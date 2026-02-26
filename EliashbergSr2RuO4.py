@@ -5,7 +5,7 @@ from triqs.gf.tools import *
 import datetime
 
 import numpy as np
-from numpy import pi
+import gc
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 from IPython.display import display, Math
@@ -91,18 +91,6 @@ interpolate_xifit = interp1d(TArr, xiArr, kind='linear', fill_value='extrapolate
 def xi(T):
     return interpolate_xifit(np.array([T]))[0]
 
-# get the LiSigmaj components of Delta... Lambda_i sigma_j in Grugr's notation
-# input: rank-4 tensor of Delta(w,k,i,j) or Delta(kx,ky,i,j)
-# deprecated, use get_SigmaLScomponents instead, with isDelta=True
-def get_DeltaLScomponents(matrix):
-    components = np.zeros(shape=(*matrix.shape[:2],9,4))
-    for i in range(9):
-        for j in range(4):
-            mat = np.kron(GellMannMatrix[i], 1j*sigma[j]@sigma[2])
-            components[:,:,i,j] = np.einsum('wkab,ba->wk', matrix, mat)/4
-    components[:,:,:,0]*=-1
-    components[:,:,:,2]*=-1
-    return components
 
 # get the LiSigmaj components of Sigma... Lambda_i sigma_j in Grgur's notation
 # input: rank-4 tensor of Sigma(w,k,i,j) or Sigma(kx,ky,i,j)
@@ -131,23 +119,6 @@ def get_Gamma(LScomponents):
     B2g = [LScomponents[:,:,1,0],LScomponents[:,:,8,2]-LScomponents[:,:,6,1],LScomponents[:,:,7,2]-LScomponents[:,:,5,1]]
     return A1g,A2g,B1g,B2g
 
-# find the symmetry characters of the k-space form factors
-# excluding the possible nodal lines
-# input rank-2 tensor of kFF(kx,ky)
-# note that this just reports the sign of the symmetry operation excluding nodal lines, cannot return anything except 1 or -1
-def character(kFF,nk):
-    inv=np.mean([np.sign(kFF[nk-i,nk-j])*np.sign(kFF[i, j]) for i in range(1, kFF.shape[0]) for j in range(1,kFF.shape[1]) if i != j and i != nk-j and i!=nk/2-1 and j!=nk/2-1])
-    sv=np.mean([np.sign(kFF[i, nk-j])*np.sign(kFF[i, j]) for i in range(1, kFF.shape[0]) for j in range(1,kFF.shape[1]) if i != j and i != nk-j and i!=nk/2-1 and j!=nk/2-1])
-    sd=np.mean([np.sign(kFF[j,i])*np.sign(kFF[i, j]) for i in range(1, kFF.shape[0]) for j in range(1,kFF.shape[1]) if i != j and i != nk-j and i!=nk/2-1 and j!=nk/2-1])
-    return [inv,sv,sd]
-
-# weighted version of character function
-# replaces sgn[kFF1]sgn[kFF2] with kFF1*kFF2/(({|kFF1|+|kFF2|)/2)^2
-def character_weighted(kFF,nk):
-    inv=np.mean([kFF[nk-i,nk-j]*kFF[i, j]/(((np.abs(kFF[nk-i,nk-j])+np.abs(kFF[i, j]))/2)**2) for i in range(1, kFF.shape[0]) for j in range(1,kFF.shape[1]) if i != j and i != nk-j and i!=nk/2-1 and j!=nk/2-1])
-    sv=np.mean([kFF[i, nk-j]*kFF[i, j]/(((np.abs(kFF[i, nk-j])+np.abs(kFF[i, j]))/2)**2) for i in range(1, kFF.shape[0]) for j in range(1,kFF.shape[1]) if i != j and i != nk-j and i!=nk/2-1 and j!=nk/2-1])
-    sd=np.mean([kFF[j,i]*kFF[i, j]/(((np.abs(kFF[j,i])+np.abs(kFF[i, j]))/2)**2) for i in range(1, kFF.shape[0]) for j in range(1,kFF.shape[1]) if i != j and i != nk-j and i!=nk/2-1 and j!=nk/2-1])
-    return [inv,sv,sd]
 
 # decompose a k-space form factor into symmetry components
 # input: rank-4 tensor of kFF(kx,ky,i,j)
@@ -202,60 +173,71 @@ def decompose_form_factor(kFF, nk):
         'p': odd
     }
 
-# get the symmetry characters of all elements in Gamma
-# input: list of LScomponents \phi_k groupled by LS irrep
-def get_all_characters(Gamma, nk):
-    characters = []
-    for group in Gamma:
-        group_characters = []
-        for element in group:
-            group_characters.append(character(element, nk))
-        characters.append(group_characters)
-    return characters
 
-# get the maximum absolute values of all elements in Gamma
-# input: list of LScomponents \phi_k groupled by LS irrep
-def get_max_abs_values(Gamma):
-    max_abs_values = []
-    for group in Gamma:
-        group_max_abs = []
-        for element in group:
-            group_max_abs.append(np.max(np.abs(element)))
-        max_abs_values.append(group_max_abs)
-    return max_abs_values
-
+# Helper for preparing self-energy real part for plotting
 # input sigma_wk as returned from the solver
 # output rank-4 tensor of LScomponents(kx,ky,i,j), chaining get_SigmaLScomponents and get_Gamma after symmetrizing freq
-def prep_for_plot_SigmaRe(sigma_wk,nk,norb):
-    SigmaRe=(((sigma_wk(0,all).data)+(sigma_wk(-1,all).data))/2).reshape(nk,nk,norb,norb)
-    Gamma = get_Gamma(get_SigmaLScomponents(SigmaRe))
-    return Gamma
 
+def prep_for_plot_SigmaRe(sigma_wk, nk, norb):
+    """Average first positive and negative frequencies for Re Sigma."""
+    # Handle TRIQS slicing and data extraction safely
+    s_p = sigma_wk(0, all)
+    s_n = sigma_wk(-1, all)
+    
+    # Avoid .data on ndarrays, use it for TRIQS/nda objects
+    data_p = s_p.data if (hasattr(s_p, 'data') and not isinstance(s_p, np.ndarray)) else s_p
+    data_n = s_n.data if (hasattr(s_n, 'data') and not isinstance(s_n, np.ndarray)) else s_n
+    
+    sigma_re = 0.5 * (np.asarray(data_p) + np.asarray(data_n))
+    gamma = get_Gamma(get_SigmaLScomponents(sigma_re.reshape(nk, nk, norb, norb)))
+    return gamma
+
+# Helper for preparing self-energy imaginary part for plotting
 # input sigma_wk as returned from the solver
 # output rank-4 tensor of LScomponents(kx,ky,i,j), chaining get_SigmaLScomponents and get_Gamma after antisymmetrizing freq
-def prep_for_plot_SigmaIm(sigma_wk,nk,norb,T):
-    SigmaIm=(((sigma_wk(0,all).data)-(sigma_wk(-1,all).data))/(2j*pi*T)).reshape(nk,nk,norb,norb)
-    Gamma = get_Gamma(get_SigmaLScomponents(SigmaIm))
-    return Gamma
+def prep_for_plot_SigmaIm(sigma_wk, nk, norb, T):
+    """Extract slope (Im Sigma / omega) for plotting."""
+    s_p = sigma_wk(0, all)
+    s_n = sigma_wk(-1, all)
+    
+    data_p = s_p.data if (hasattr(s_p, 'data') and not isinstance(s_p, np.ndarray)) else s_p
+    data_n = s_n.data if (hasattr(s_n, 'data') and not isinstance(s_n, np.ndarray)) else s_n
+    
+    # (Im Sigma) / (i * pi * T) 
+    sigma_im = (np.asarray(data_p) - np.asarray(data_n)) / (2j * np.pi * T)
+    gamma = get_Gamma(get_SigmaLScomponents(sigma_im.reshape(nk, nk, norb, norb)))
+    return gamma
 
-# input vs_wk as returned from the solver
+# Helper for preparing gap function for plotting
+# input vs_wk as returned from the solver or 1D array of Delta_iw,kx,ky,alpha,beta flattened
 # output rank-4 tensor of LScomponents(kx,ky,i,j), chaining get_DeltaLScomponents and get_Gamma
-def prep_for_plot_Delta(vs,nk,norb, oddfreq=False):
-    if oddfreq:
-        Delta=((vs(0,all).data-vs(-1,all).data)/2).reshape(nk,nk,norb,norb)
+def prep_for_plot_Delta(vs, nw, nk, norb, oddfreq=False):
+    """Prepare gap function (even or odd frequency) for point-group analysis."""
+    # Handle both Gf objects and flat numpy arrays
+    # Avoid .data on ndarrays (it's a memoryview), use it for TRIQS objects
+    if hasattr(vs, 'data') and not isinstance(vs, np.ndarray):
+        delta_data = np.asarray(vs.data).reshape(2 * nw, nk, nk, norb, norb)
     else:
-        Delta=((vs(0,all).data+vs(-1,all).data)/2).reshape(nk,nk,norb,norb)
-    # Find the maximum absolute value in Delta and its index
-    max_abs_index = np.unravel_index(np.argmax(np.abs(Delta)), Delta.shape)
+        delta_data = np.asarray(vs).reshape(2 * nw, nk, nk, norb, norb)
     
-    # Get the actual value at the index of maximum absolute value
-    max_val = Delta[max_abs_index]
+    # Extract first positive and negative frequencies
+    # indices: nw is first positive, nw-1 is first negative for a 2*nw mesh
+    d_p = delta_data[nw]
+    d_n = delta_data[nw-1]
     
-    # Normalize Delta by the value at the index of maximum absolute value
-    Delta /= max_val
-    
-    Gamma = get_Gamma(get_DeltaLScomponents(Delta))
-    return Gamma
+    if oddfreq:
+        delta_k = 0.5 * (d_p - d_n)
+    else:
+        delta_k = 0.5 * (d_p + d_n)
+
+    # Normalize by max absolute value for visual comparison
+    max_idx = np.unravel_index(np.abs(delta_k).argmax(), delta_k.shape)
+    max_val = delta_k[max_idx]
+    if np.abs(max_val) > 1e-12:
+        delta_k /= max_val
+
+    gamma = get_Gamma(get_SigmaLScomponents(delta_k, isDelta=True))
+    return gamma
 
 # input rank-4 tensor of LScomponents(kx,ky,i,j)
 # output list of indices of dominant form-factors; first index is the irrep, second is the form-factor see get_Gamma
@@ -350,7 +332,7 @@ def plot_Gamma(Gamma,nk,uniform_colorbar=False, round_character=True):
     plt.show()
 
 # implements bandstructure from Stangier, Berg, Schmalian, no SOC
-class SESSr2RuO4(EliashbergSolver):
+class SBSSr2RuO4(EliashbergSolver):
     def __init__(self, nk=12, n_w=1024, T=700., mu=0., Xi=2.58, Q=2*pi*0.3, g=1.36/np.sqrt(3), eps_xx=0.0, nu_xy=0.39, alpha=1.0, beta=1.0, norb=6, Vertices=None, **kwargs):
         if Vertices is None:
              Vertices = L0sigma[1:] # Default to spin-interaction vertices only
@@ -446,61 +428,171 @@ class SESSr2RuO4(EliashbergSolver):
 
         return np.kron(hk, np.eye(2))
 
+    # -----------------------------------------------------------------------
+    # Symmetry definitions for SBSSr2RuO4 (SRO) - D4h 16 operations
+    # -----------------------------------------------------------------------
+    def _k_transforms(self):
+        inv = self._inv_idx()
+        return {
+            'identity':     lambda d: d,
+            'inversion':    lambda d: d[inv][:, inv],
+            'sigma_x':      lambda d: d[inv, :],
+            'sigma_y':      lambda d: d[:, inv],
+            'sigma_d':      lambda d: d.transpose(1, 0, 2, 3),                            # (x,y) -> (y,x)
+            'sigma_dp':     lambda d: d[inv][:, inv].transpose(1, 0, 2, 3),               # (x,y) -> (-y,-x)
+            'C2z':          lambda d: d[inv][:, inv],
+            'C4z_anti':     lambda d: d[:, inv].transpose(1, 0, 2, 3),                    # (x,y) -> (-y,x) (anti)
+            'C4z_clock':    lambda d: d[inv, :].transpose(1, 0, 2, 3),                    # (x,y) -> (y,-x) (clock)
+            'S4':           lambda d: d[:, inv].transpose(1, 0, 2, 3),                    # (x,y) -> (-y,x) (anti spatially)
+            'S4_inv':       lambda d: d[inv, :].transpose(1, 0, 2, 3),                    # (x,y) -> (y,-x) (clock spatially)
+            'C2x':          lambda d: d[:, inv],                                          # (x,y) -> (x,-y)
+            'C2y':          lambda d: d[inv, :],                                          # (x,y) -> (-x,y)
+            'C2_xplusy':    lambda d: d.transpose(1, 0, 2, 3),                            # (x,y) -> (y,x)
+            'C2_xminusy':   lambda d: d[inv][:, inv].transpose(1, 0, 2, 3),               # (x,y) -> (-y,-x)
+            'sigma_h':      lambda d: d,
+        }
+
+    # Orbital and Spin Unitaries for SBSSr2RuO4
+    def _U_identity(self): return np.eye(self.norb)
+    def _U_inversion(self): return np.eye(self.norb)
+    
+    def _U_sigma_x(self):
+        U_orb = np.diag([1, -1, -1])
+        U_spin = -1j * sigma[1]
+        return np.kron(U_orb, U_spin)
+
+    def _U_sigma_y(self):
+        U_orb = np.diag([-1, 1, -1])
+        U_spin = -1j * sigma[2]
+        return np.kron(U_orb, U_spin)
+
+    def _U_sigma_d(self):
+        U_orb = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
+        U_spin = (-1j / np.sqrt(2)) * (sigma[1] - sigma[2])
+        return np.kron(U_orb, U_spin)
+
+    def _U_sigma_dp(self):
+        U_orb = np.array([[0, -1, 0], [-1, 0, 0], [0, 0, 1]])
+        U_spin = (-1j / np.sqrt(2)) * (sigma[1] + sigma[2])
+        return np.kron(U_orb, U_spin)
+
+    def _U_sigma_h(self):
+        U_orb = np.diag([-1, -1, 1])
+        U_spin = -1j * sigma[3]
+        return np.kron(U_orb, U_spin)
+
+    def _U_C2z(self):
+        # C2z = sigma_x * sigma_y
+        return self._U_sigma_x() @ self._U_sigma_y()
+
+    def _U_C4z_anti(self):
+        # C4z_anti = sigma_x * sigma_d
+        return self._U_sigma_x() @ self._U_sigma_d()
+
+    def _U_C4z_clock(self):
+        # C4z_clock = sigma_y * sigma_d
+        return self._U_sigma_y() @ self._U_sigma_d()
+
+    def _U_S4(self):
+        # S4 = sigma_h * C4z_anti
+        return self._U_sigma_h() @ self._U_C4z_anti()
+
+    def _U_S4_inv(self):
+        # S4_inv = sigma_h * C4z_clock
+        return self._U_sigma_h() @ self._U_C4z_clock()
+
+    def _U_C2x(self):
+        # C2x = sigma_h * sigma_y
+        return self._U_sigma_h() @ self._U_sigma_y()
+
+    def _U_C2y(self):
+        # C2y = sigma_h * sigma_x
+        return self._U_sigma_h() @ self._U_sigma_x()
+
+    def _U_C2_xplusy(self):
+        # C2_axis where axis is y=x. C2 = sigma_h * sigma_d
+        return self._U_sigma_h() @ self._U_sigma_d()
+
+    def _U_C2_xminusy(self):
+        # C2_axis where axis is y=-x. C2 = sigma_h * sigma_dp
+        return self._U_sigma_h() @ self._U_sigma_dp()
+
+
     def calculate_gamma(self, wmesh_boson_kmesh, target_shape):
         """
-        Calculate Gamma_ph using Paramagnon form-factor (Dahm/SRO style).
+        Calculate Gamma_ph using Paramagnon form-factor.
         Free Parameters:
             Chi0: Static susceptibility prefactor
             Xi: Correlation length
             gamma: Landau damping parameter
-            bandwidth: Bandwidth for damping scaling
+            bandwidth: Bandwidth for onset of high frequency scaling
+        
+        Factorized form: gamma_ph[w, k, a, b, c, d] = chi_wk[w, k] * vertex_sum[a, b, c, d]
         """
-        gamma_ph = Gf(mesh=wmesh_boson_kmesh, target_shape=target_shape*2)
-        chi_wk = Gf(mesh=wmesh_boson_kmesh, target_shape=())
+        # chi_wr_from_chi_wk expects a 4-index tensor (tensor_valued<4>)
+        chi_wk = Gf(mesh=wmesh_boson_kmesh, target_shape=(1, 1, 1, 1))
         
         for iO, k in wmesh_boson_kmesh:
-            kx,ky,kz = k
-            for Qx in [self.Q,-self.Q]:
-                for Qy in [self.Q,-self.Q]:
-                    chi_wk[iO,k] += self.Chi0/(1/self.Xi**2 + 2 * (2- np.cos(kx - Qx) - np.cos(ky - Qy)) + np.abs(iO.value) * self.gamma * (1+ (np.abs(iO.value))/(self.bandwidth)))/4 
+            kx, ky, kz = k
+            for Qx in [self.Q, -self.Q]:
+                for Qy in [self.Q, -self.Q]:
+                    denominator = (1/self.Xi**2 + 2 * (2 - np.cos(kx - Qx) - np.cos(ky - Qy)) + 
+                                  np.abs(iO.value) * self.gamma * (1 + (np.abs(iO.value))/(self.bandwidth)))
+                    chi_wk[iO, k][0,0,0,0] += self.Chi0 / denominator / 4.0
         
-        # Sum over provided vertices (assumed to be the interaction ones)
+        # Constant vertex tensor in orbital space
         vertex_sum = np.zeros(target_shape*2, dtype=complex)
         for v in self.Vertices:
              vertex_sum += np.tensordot(v, v, axes=0)
              
-        gamma_ph.data[:] = self.g**2 * chi_wk.data[:, :, None, None, None, None] * vertex_sum
-        
-        print(f"Just loaded gamma_ph at {datetime.datetime.now()}")
-        self.gamma_ph = gamma_ph
-        return gamma_ph
+        # Store factorized parts for memory-efficient solvers
+        self.chi_wk = chi_wk
+        self.vertex_sum = vertex_sum
+
+        # We keep gamma_ph creation for compatibility, but it might crash for NW=4096.
+        # Check if mesh is small enough to avoid memory crash (threshold ~ 4GB)
+        mesh_size = len(wmesh_boson_kmesh) * np.prod(target_shape*2) * 16 # 16 bytes per complex
+        if mesh_size < 4 * 1e9:
+            gamma_ph = Gf(mesh=wmesh_boson_kmesh, target_shape=target_shape*2)
+            gamma_ph.data[:] = self.g**2 * chi_wk.data[:, :, 0, 0, 0, 0, None, None, None, None] * vertex_sum
+            self.gamma_ph = gamma_ph
+        else:
+            print("Warning: Large mesh detected. Skipping full gamma_ph allocation to save memory.")
+
+        print(f"Just loaded factorized interaction objects at {datetime.datetime.now()}")
+        return None # Return None as solvers should use self.chi_wk
 
     def calculate_gamma_static(self, kmesh, target_shape):
         """
-        Calculate Static Gamma_ph using Paramagnon form-factor (Dahm/SRO style).
+        Calculate Static Gamma_ph using Paramagnon form-factor at w=0.
         Free Parameters:
             Chi0: Static susceptibility prefactor
             Xi: Correlation length
+        Factorized form: gamma_ph_static[k, a, b, c, d] = chi_k[k] * vertex_sum[a, b, c, d]
         """
-        gamma_ph = Gf(mesh=kmesh, target_shape=target_shape*2)
-        chi_k = Gf(mesh=kmesh, target_shape=())
+        chi_k = Gf(mesh=kmesh, target_shape=(1, 1, 1, 1))
         
         for k in kmesh:
-            kx,ky,kz = k
-            for Qx in [self.Q,-self.Q]:
-                for Qy in [self.Q,-self.Q]:
-                    chi_k[k] += self.Chi0/(1/self.Xi**2 + 2 * (2- np.cos(kx - Qx) - np.cos(ky - Qy)))/4 
+            kx, ky, kz = k
+            for Qx in [self.Q, -self.Q]:
+                for Qy in [self.Q, -self.Q]:
+                    denominator = (1/self.Xi**2 + 2 * (2 - np.cos(kx - Qx) - np.cos(ky - Qy)))
+                    chi_k[k][0,0,0,0] += self.Chi0 / denominator / 4.0
         
-        # Sum over provided vertices (assumed to be the interaction ones)
         vertex_sum = np.zeros(target_shape*2, dtype=complex)
         for v in self.Vertices:
              vertex_sum += np.tensordot(v, v, axes=0)
              
-        gamma_ph.data[:] = self.g**2 * chi_k.data[:, None, None, None, None] * vertex_sum
+        self.chi_k = chi_k
+        self.vertex_sum = vertex_sum
         
-        print(f"Just loaded static gamma_ph at {datetime.datetime.now()}")
-        self.gamma_ph_static = gamma_ph
-        return gamma_ph
+        # Static mesh is usually small, so we keep gamma_ph_static
+        gamma_ph_static = Gf(mesh=kmesh, target_shape=target_shape*2)
+        gamma_ph_static.data[:] = self.g**2 * chi_k.data[:, 0, 0, 0, 0, None, None, None, None] * vertex_sum
+        
+        print(f"Just loaded static factorized interaction at {datetime.datetime.now()}")
+        self.gamma_ph_static = gamma_ph_static
+        return gamma_ph_static
 
     def plot_quasiparticle_weight(self, orbital_resolved=False, figsize=(8, 7)):
         """Plot the quasiparticle spectral weight Z = 1/(1 - Im Σ(iω₁)/ω₁).
@@ -598,12 +690,15 @@ class SESSr2RuO4(EliashbergSolver):
     
             return fig, ax
 
-    def plot_delta(self):
+    def plot_delta(self, oddfreq=False):
         """Plot the gap Δ(k) using the multi-orbital plotting function."""
-        if not hasattr(self, 'vs'):
-            raise ValueError("No gap eigenvector available. Run solver() first.")
-
-        Delta = prep_for_plot_Delta(self.vs[0], self.nk, self.norb)
+        if hasattr(self, 'delta_wk') and self.delta_wk is not None:
+            Delta = prep_for_plot_Delta(self.delta_wk, self.n_w, self.nk, self.norb, oddfreq=oddfreq)
+        elif hasattr(self, 'vs_dynamic'):
+            Delta = prep_for_plot_Delta(self.vs_dynamic[:, 0], self.n_w, self.nk, self.norb, oddfreq=oddfreq)
+        else:
+            raise ValueError("No gap function available. Run solver first.")
+        
         plot_Gamma(Delta, self.nk)
 
     def plot_deltaMF(self, vs=None, idx=0):
@@ -723,7 +818,7 @@ class SESSr2RuO4(EliashbergSolver):
         return fig, ax
 
 # implements bandstructure from Palle, Schmalian, intended for a BCC lattice, so some terms are turned off to make it work on a square lattice
-class PSSr2RuO4(SESSr2RuO4):
+class PSSr2RuO4(SBSSr2RuO4):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Override parameters to match EliashbergFunction.py's EliashbergSolverSRO
@@ -816,14 +911,28 @@ class PSSr2RuO4(SESSr2RuO4):
 
 
 if __name__ == '__main__':
-    SRO1 = SESSr2RuO4(T=100, n_w=512, g=2., tol=1e-6, fixed_density=True, filling=0.65)
-    SRO1.solver()
-    SRO1.plot_fermi_surface()
-    SRO1.plot_quasiparticle_weight()
-    SRO1.plot_delta()
+    print("=== SRO1 (SBSSr2RuO4) ===")
+    SRO1 = SBSSr2RuO4(T=100, n_w=512, g=2., tol=1e-6, fixed_density=True, filling=0.65)
+    print("\nSolving Dyson Equation...")
+    SRO1.dyson_solver()
+    print("\nSolving Linearized Gap Equation (Dynamic)...")
+    SRO1.solve_linearized_gap_dynamic()
+    
+    print("\n--- SRO1 Minimal Story ---")
+    print(f"Run Parameters: T={SRO1.T}, n_w={SRO1.n_w}, g={SRO1.g}, filling={SRO1.filling}")
+    print(f"Leading Eigenvalues: {SRO1.En_dynamic}")
+    print("\nLeading Eigenvector Symmetry Analysis:")
+    SRO1.check_symmetries(verbose=True)
 
+    print("\n\n=== SRO2 (PSSr2RuO4) ===")
     SRO2 = PSSr2RuO4(T=100, n_w=512, g=2., tol=1e-6, fixed_density=True, filling=0.65)
-    SRO2.solver()
-    SRO2.plot_fermi_surface()
-    SRO2.plot_quasiparticle_weight()
-    SRO2.plot_delta()
+    print("\nSolving Dyson Equation...")
+    SRO2.dyson_solver()
+    print("\nSolving Linearized Gap Equation (Dynamic)...")
+    SRO2.solve_linearized_gap_dynamic()
+    
+    print("\n--- SRO2 Minimal Story ---")
+    print(f"Run Parameters: T={SRO2.T}, n_w={SRO2.n_w}, g={SRO2.g}, filling={SRO2.filling}")
+    print(f"Leading Eigenvalues: {SRO2.En_dynamic}")
+    print("\nLeading Eigenvector Symmetry Analysis:")
+    SRO2.check_symmetries(verbose=True)

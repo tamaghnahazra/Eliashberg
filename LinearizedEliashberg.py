@@ -67,7 +67,12 @@ def get_max_abs_values(Gamma):
 
 def get_SigmaLScomponents_1orb(matrix, isDelta=False):
     # For 1 orbital, basis is just Identity (scalar 1), Spin basis is sigma (Pauli matrices)
+    # If norb > 2, we take the first 2x2 block (assuming first orbital's spin sector)
+    norb = matrix.shape[-1]
     components = np.zeros(shape=(*matrix.shape[:2], 1, 4), dtype=complex)
+    
+    # Project the first 2x2 spin sector
+    matrix_2x2 = matrix[..., :2, :2]
     
     for j in range(4):
         mat = sigma[j]
@@ -77,7 +82,7 @@ def get_SigmaLScomponents_1orb(matrix, isDelta=False):
             mat = 1j * sigma[j] @ sigma[2]
         
         # Project: Tr(M * basis) / Tr(basis * basis) -> Tr(M * basis) / 2
-        components[:,:,0,j] = np.einsum('wkab,ba->wk', matrix, mat) / 2.0
+        components[:,:,0,j] = np.einsum('wkab,ba->wk', matrix_2x2, mat) / 2.0
     if isDelta:
         components[:,:,:,0] *= -1
         components[:,:,:,2] *= -1
@@ -91,25 +96,31 @@ def get_Gamma_1orb(LScomponents):
     return singlet, triplet, [], []
 
 def prep_for_plot_SigmaRe_1orb(sigma_wk, nk, norb):
-    if hasattr(sigma_wk, 'data'):
-        data = sigma_wk.data
+    # Avoid .data on ndarrays (memoryview issue), use it for TRIQS objects
+    if hasattr(sigma_wk, 'data') and not isinstance(sigma_wk, np.ndarray):
+        data = np.asarray(sigma_wk.data)
     else:
-        data = sigma_wk
+        data = np.asarray(sigma_wk)
 
     # Use first frequency index
-    SigmaRe = data[0].reshape(nk, nk, 2, 2)
+    SigmaRe = data[0].reshape(nk, nk, norb, norb)
     
     Gamma = get_Gamma_1orb(get_SigmaLScomponents_1orb(SigmaRe))
     return Gamma
 
-def prep_for_plot_Delta_1orb(vs, nk, norb, oddfreq=False):
-    if hasattr(vs, 'data'):
-        data = vs.data
+def prep_for_plot_Delta_1orb(vs, nk, norb, oddfreq=False, n_w=None):
+    if hasattr(vs, 'data') and not isinstance(vs, np.ndarray):
+        data = np.asarray(vs.data)
     else:
-        data = vs
+        data = np.asarray(vs)
         
-    if data.ndim == 4:
-        data = data.reshape(data.shape[0], nk, nk, 2, 2)
+    if data.ndim == 1:
+        # If 1D, it's likely an eigenvector from solve_linearized_gap_dynamic
+        if n_w is None:
+             raise ValueError("n_w must be provided to reshape 1D dynamic eigenvector.")
+        data = data.reshape(2 * n_w, nk, nk, norb, norb)
+    elif data.ndim == 4:
+        data = data.reshape(data.shape[0], nk, nk, norb, norb)
         
     nw_idx = data.shape[0] // 2
     v0 = data[nw_idx] # first positive
@@ -167,6 +178,92 @@ def plot_Gamma_1orb(Gamma, nk, uniform_colorbar=False, round_character=True):
     
     plt.tight_layout()
     plt.show()
+# ===========================================================================
+# D4h Character Table and Irrep Projection
+# ===========================================================================
+
+# Mapping of the 16 operations implemented in code to the 10 D4h classes:
+_D4H_CLASSES = {
+    'identity':     'E',
+    'C4z_anti':     '2C4',
+    'C4z_clock':    '2C4',
+    'C2z':          'C2',
+    'C2x':          '2Cp2',
+    'C2y':          '2Cp2',
+    'C2_xplusy':    '2Cpp2',
+    'C2_xminusy':   '2Cpp2',
+    'inversion':    'i',
+    'S4':           '2S4',
+    'S4_inv':       '2S4',
+    'sigma_h':      'sh',
+    'sigma_x':      '2sv',
+    'sigma_y':      '2sv',
+    'sigma_d':      '2sd',
+    'sigma_dp':     '2sd'
+}
+
+_D4H_CHAR_VALS = {
+    # Irrep: {Class: Character}
+    'A1g': {'E': 1, '2C4': 1, 'C2': 1, '2Cp2': 1, '2Cpp2': 1, 'i': 1, '2S4': 1, 'sh': 1, '2sv': 1, '2sd': 1},
+    'A2g': {'E': 1, '2C4': 1, 'C2': 1, '2Cp2':-1, '2Cpp2':-1, 'i': 1, '2S4': 1, 'sh': 1, '2sv':-1, '2sd':-1},
+    'B1g': {'E': 1, '2C4':-1, 'C2': 1, '2Cp2': 1, '2Cpp2':-1, 'i': 1, '2S4':-1, 'sh': 1, '2sv': 1, '2sd':-1},
+    'B2g': {'E': 1, '2C4':-1, 'C2': 1, '2Cp2':-1, '2Cpp2': 1, 'i': 1, '2S4':-1, 'sh': 1, '2sv':-1, '2sd': 1},
+    'Eg':  {'E': 2, '2C4': 0, 'C2':-2, '2Cp2': 0, '2Cpp2': 0, 'i': 2, '2S4': 0, 'sh':-2, '2sv': 0, '2sd': 0},
+    'A1u': {'E': 1, '2C4': 1, 'C2': 1, '2Cp2': 1, '2Cpp2': 1, 'i':-1, '2S4':-1, 'sh':-1, '2sv':-1, '2sd':-1},
+    'A2u': {'E': 1, '2C4': 1, 'C2': 1, '2Cp2':-1, '2Cpp2':-1, 'i':-1, '2S4':-1, 'sh':-1, '2sv': 1, '2sd': 1},
+    'B1u': {'E': 1, '2C4':-1, 'C2': 1, '2Cp2': 1, '2Cpp2':-1, 'i':-1, '2S4': 1, 'sh':-1, '2sv':-1, '2sd': 1},
+    'B2u': {'E': 1, '2C4':-1, 'C2': 1, '2Cp2':-1, '2Cpp2': 1, 'i':-1, '2S4': 1, 'sh':-1, '2sv': 1, '2sd':-1},
+    'Eu':  {'E': 2, '2C4': 0, 'C2':-2, '2Cp2': 0, '2Cpp2': 0, 'i':-2, '2S4': 0, 'sh': 2, '2sv': 0, '2sd': 0},
+}
+
+# Global D4h character table for the 16 operations implemented
+D4H_CHARACTER_TABLE = {
+    irrep: {op: vals[cls] for op, cls in _D4H_CLASSES.items()}
+    for irrep, vals in _D4H_CHAR_VALS.items()
+}
+
+def project_delta(psi, target_irrep, character_table=D4H_CHARACTER_TABLE, apply_symmetry=None):
+    """
+    Projects a wavefunction psi(kx, ky, alpha, beta) into a specific Irrep of D4h.
+
+    Parameters:
+    - psi: 4D numpy array (kx, ky, norb, norb)
+    - target_irrep: String key for the desired irrep (e.g., 'A1g', 'B1g', 'Eg')
+    - character_table: Dict {irrep_name: {op_name: character}}
+    - apply_symmetry: Function(op_name, psi) -> transformed_psi
+
+    Returns:
+    - psi_proj: The projected wavefunction array.
+    """
+    if target_irrep not in character_table:
+        raise ValueError(f"Irrep {target_irrep} not found in character table.")
+    
+    if apply_symmetry is None:
+        raise ValueError("apply_symmetry function must be provided (e.g., solver.apply_symmetry).")
+
+    irrep_chars = character_table[target_irrep]
+    
+    # 1. Determine Group Constants
+    h = len(irrep_chars) # Order of the group (16 for D4h)
+    
+    # Dimension of the irrep is the character of the Identity operation ('identity')
+    d_gamma = int(np.real(irrep_chars.get('identity', 1)))
+    
+    # 2. Initialize the accumulator (ensure complex type)
+    psi_proj = np.zeros_like(psi, dtype=np.complex128)
+    
+    # 3. Iterate over symmetry operations and sum
+    for op_name, chi in irrep_chars.items():
+        # Apply symmetry operation R to psi: R |psi>
+        psi_transformed = apply_symmetry(op_name, psi)
+        
+        # Accumulate: chi*(R) * R |psi>
+        psi_proj += np.conj(chi) * psi_transformed
+
+    # 4. Apply Normalization Factor (d_gamma / h)
+    psi_proj *= (d_gamma / h)
+    
+    return psi_proj
 
 
 class EliashbergSolver:
@@ -175,7 +272,7 @@ class EliashbergSolver:
     Derived from EliashbergSolverSRO but made more general by checking
     norb and allowing overloading of calculate_hk and calculate_gamma.
     """
-    def __init__(self, nk=12, n_w=24, T=700., mu=0., Xi=2.58, Q=2*pi*0.3, norb=6, Vertices=None, g=1.36/np.sqrt(3), taumeshfactor=6, tol=1e-3, eps=1., dyson_only=False, fixed_density=False, filling=2./3., tau=1./0.001):
+    def __init__(self, nk=12, n_w=24, T=700., mu=0., Xi=2.58, Q=2*pi*0.3, norb=6, Vertices=None, g=1.36/np.sqrt(3), taumeshfactor=6, tol=1e-3, eps=1., fixed_density=False, filling=2./3., tau=1./0.001):
         self.nk = nk # number of k points
         self.norb = norb # number of orbitals
         self.n_w = n_w # number of positive fermionic Matsubara frequencies
@@ -192,7 +289,6 @@ class EliashbergSolver:
 
         self.filling = filling
         self.fixed_density=fixed_density
-        self.dyson_only = dyson_only
         self.tau = tau
 
     # Abstract function to calculate H(k)
@@ -225,13 +321,232 @@ class EliashbergSolver:
         return gf_wk
 
     def fermion_antisymmetrize(self, Delta):
-        inv_idx = np.concatenate(([0], np.arange(self.nk - 1, 0, -1))).astype(int)
+        inv_idx = self._inv_idx()
         Delta_reshaped = Delta.data.reshape(2 * self.n_w, self.nk, self.nk, self.norb, self.norb)
         inv_flip = Delta_reshaped[::-1, inv_idx, :, :, :][:, :, inv_idx, :, :].transpose(0, 1, 2, 4, 3)
         Delta.data[:] = 0.5 * (Delta_reshaped - inv_flip).reshape(2 * self.n_w, self.nk ** 2, self.norb, self.norb)
         return Delta
 
-    def solver(self,solncount=1,seed_sigma=None,zero_Gtau0=True):
+    def fermion_antisymmetrize_static(self, Delta_k):
+        """$\Delta_{ab}(k) = -\Delta_{ba}(-k)$."""
+        inv_idx = self._inv_idx()
+        # Delta_k shape is (nk, nk, norb, norb)
+        inv_flip = Delta_k[inv_idx, :, :, :][:, inv_idx, :, :].transpose(0, 1, 3, 2)
+        return 0.5 * (Delta_k - inv_flip)
+
+    # -----------------------------------------------------------------------
+    # Generic symmetry-analysis framework
+    # -----------------------------------------------------------------------
+    def _k_transforms(self):
+        """Dictionary of {op_name: transform_func} for k-space mappings.
+        Subclasses should implement this.
+        """
+        return {}
+
+    def apply_symmetry(self, op, Delta_k):
+        """Transform gap by named operation: Δ_new(k) = U @ Δ(k_trans) @ U_T"""
+        k_trans = self._k_transforms()
+        if op not in k_trans:
+            raise ValueError(f"Operation '{op}' not supported by {self.__class__.__name__}")
+        
+        U_func = getattr(self, f"_U_{op}", None)
+        if U_func is None:
+            raise AttributeError(f"Subclass must implement _U_{op}()")
+        
+        U = U_func()
+        Delta_trans = k_trans[op](Delta_k)
+        
+        # Apply unitary: U @ Delta @ U_T
+        # Delta_trans shape: (nk, nk, norb, norb)
+        # U shape: (norb, norb)
+        return np.einsum('ab,xybc,cd->xyad', U, Delta_trans, U.T)
+
+    def _symmetry_character(self, Delta_orig, Delta_trans, title, figsize=None, threshold=1e-3, to_plot=True):
+        """Plot the ratio Δ_orig / Δ_trans for each component if to_plot is True,
+        else return the global average character on valid k-points."""
+        nk = self.nk
+        
+        # Small epsilon to avoid division by zero
+        eps = 1e-15
+        
+        # Find points where original gap is significant
+        mask = np.abs(Delta_orig) > threshold * np.max(np.abs(Delta_orig))
+        
+        if not np.any(mask):
+            return 0.0
+            
+        # Character(k) = Tr(Delta_orig(k)^\dagger @ Delta_trans(k)) / |Delta_orig(k)|^2
+        num = np.sum(np.conj(Delta_orig) * Delta_trans, axis=(-2, -1))
+        den = np.sum(np.conj(Delta_orig) * Delta_orig, axis=(-2, -1))
+        
+        char_k = np.real(num / (den + eps))
+        
+        # Filter masked points for calculation
+        char_avg = np.mean(char_k[mask[:,:,0,0]]) if mask.ndim > 2 else np.mean(char_k[mask])
+
+        if to_plot:
+            fig, ax = plt.subplots(figsize=figsize or (6, 5))
+            im = ax.imshow(char_k, origin='lower', extent=[0, 2*np.pi, 0, 2*np.pi], cmap='RdBu_r', vmin=-1.1, vmax=1.1)
+            ax.set_title(f"{title}\nAverage: {char_avg:.3f}")
+            ax.set_xlabel('$k_x$')
+            ax.set_ylabel('$k_y$')
+            plt.colorbar(im)
+            plt.show()
+            
+        return char_avg
+
+    def symmetry_character(self, op, eigvec=None, figsize=None, threshold=1e-3, to_plot=True):
+        """Calculate or plot the character of a named symmetry operation."""
+        Delta_k = self._prepare_gap_for_plotting(eigvec)
+        Delta_trans = self.apply_symmetry(op, Delta_k)
+        
+        title = f"{op.replace('_', ' ').capitalize()} character"
+        return self._symmetry_character(Delta_k, Delta_trans, title, figsize, threshold, to_plot=to_plot)
+
+    def check_symmetries(self, eigvec=None, threshold=1e-3, verbose=True):
+        """Check characters under all symmetries of the group.
+        Default: vs_static[:, 0], then vs_dynamic[:, 0]."""
+        Delta_k = self._prepare_gap_for_plotting(eigvec)
+        
+        ops = sorted(self._k_transforms().keys())
+        characters = {}
+        
+        if verbose:
+            print(f"{'Operation':<15} | Character")
+            print("-" * 35)
+
+        for op in ops:
+            char = self.symmetry_character(op, eigvec=Delta_k, to_plot=False, threshold=threshold)
+            characters[op] = char
+            if verbose:
+                print(f"{op:<15} | {char:>10.6f}")
+
+        # Identify closest irrep from D4H_CHARACTER_TABLE
+        best_irrep = "Unknown"
+        max_overlap = -1.0
+        
+        for irrep, irrep_chars in D4H_CHARACTER_TABLE.items():
+            # Character overlap score: 1/|G| * sum_g chi_obs(g) * (chi_irrep(g) / chi_irrep(E))
+            # chi_irrep(E) is the dimension of the irrep (1 for A, B; 2 for E)
+            dim = irrep_chars.get('identity', 1)
+            overlap = 0.0
+            valid_count = 0
+            for op, val in characters.items():
+                if op in irrep_chars:
+                    overlap += val * (irrep_chars[op] / dim)
+                    valid_count += 1
+            
+            if valid_count > 0:
+                overlap /= valid_count
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                    best_irrep = irrep
+        
+        if verbose:
+            print("-" * 35)
+            print(f"Closest Irrep: {best_irrep} (overlap: {max_overlap:.4f})")
+                
+        return characters, best_irrep
+
+    # -----------------------------------------------------------------------
+    # Generic symmetry-analysis utilities (no specific symmetry assumed)
+    # -----------------------------------------------------------------------
+    def _inv_idx(self):
+        """Index map for k → -k on a periodic grid of size nk: i ↦ (nk - i) % nk."""
+        return np.concatenate(([0], np.arange(self.nk - 1, 0, -1))).astype(int)
+
+    def _prepare_gap_for_plotting(self, eigvec=None, oddfreq=False):
+        """Normalise eigvec to ndarray of shape (nk, nk, norb, norb).
+        Falls back to delta_wk, vs_static[:, 0], then vs_dynamic[:, 0].
+        If dynamic gap, takes the first positive/negative Matsubara frequencies."""
+        if eigvec is None:
+            if hasattr(self, 'delta_wk') and self.delta_wk is not None:
+                eigvec = self.delta_wk
+            elif hasattr(self, 'vs_static'):
+                eigvec = self.vs_static[:, 0]
+            elif hasattr(self, 'vs_dynamic'):
+                eigvec = self.vs_dynamic[:, 0]
+            else:
+                raise ValueError("No eigenvector or gap function found. Pass eigvec or run a solver first.")
+
+        if hasattr(eigvec, 'data') and not isinstance(eigvec, np.ndarray):
+            data = np.asarray(eigvec.data)
+        else:
+            data = np.asarray(eigvec)
+
+        static_size = self.nk**2 * self.norb**2
+        dynamic_size = 2 * self.n_w * static_size
+
+        if data.size == dynamic_size:
+            # Dynamic gap: shape (2*n_w, nk, nk, norb, norb)
+            Delta = data.reshape(2 * self.n_w, self.nk, self.nk, self.norb, self.norb)
+            if oddfreq:
+                Deltak = (Delta[self.n_w] - Delta[self.n_w - 1]) / 2.0
+            else:
+                Deltak = (Delta[self.n_w] + Delta[self.n_w - 1]) / 2.0
+            data = Deltak
+        elif data.size == static_size:
+            data = data.reshape(self.nk, self.nk, self.norb, self.norb)
+        else:
+            raise ValueError(f"Unexpected size: {data.size}. Expected {static_size} or {dynamic_size}")
+
+        max_val = data.flat[np.abs(data).argmax()]
+        if np.abs(max_val) > 1e-15:
+            data /= max_val
+            
+        return data
+
+    def _symmetry_character(self, Delta_orig, Delta_trans, title, figsize=None, threshold=1e-3, to_plot=True):
+        """Plot the ratio Δ_orig / Δ_trans for each component if to_plot is True,
+        else return the global average character on valid k-points."""
+        n_grid = self.norb
+        
+        if to_plot:
+            fig, axs = plt.subplots(n_grid, n_grid,
+                                   figsize=(3*n_grid, 3*n_grid) if figsize is None else figsize,
+                                   squeeze=False)
+            fig.suptitle(title)
+            
+        sum_char = 0.0
+        count_valid = 0
+
+        for a in range(n_grid):
+            for b in range(n_grid):
+                D_orig  = Delta_orig [:, :, a, b]
+                D_trans = Delta_trans[:, :, a, b]
+                character = np.full((self.nk, self.nk), np.nan)
+                d_max = np.max(np.abs(D_orig))
+                
+                if d_max > 1e-12:
+                    mask  = np.abs(D_orig) > threshold * d_max
+                    valid = mask & (np.abs(D_trans) > threshold * d_max)
+                    
+                    if np.any(valid):
+                        char_vals = (D_orig[valid] / D_trans[valid]).real
+                        sum_char += np.sum(char_vals)
+                        count_valid += np.sum(valid)
+                        
+                        character[valid] = char_vals
+                        character = np.clip(character, -2, 2)
+                        
+                if to_plot:
+                    ax = axs[a, b]
+                    im = ax.imshow(character, cmap='coolwarm', origin='lower',
+                                  vmin=-1.5, vmax=1.5, interpolation='nearest')
+                    if d_max > 1e-8:
+                        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    if a == n_grid - 1: ax.set_xlabel('$k_x$')
+                    if b == 0:          ax.set_ylabel('$k_y$')
+                    ax.set_title(f'orb ({a},{b}) max={d_max:.1e}', fontsize=8)
+                    
+        if to_plot:
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            plt.show()
+
+        return sum_char / count_valid if count_valid > 0 else np.nan
+
+
+    def dyson_solver(self,seed_sigma=None,zero_Gtau0=True):
         h_k = Gf(mesh=MeshBrillouinZone(bz=BrillouinZone(BravaisLattice(units=np.eye(2))), n_k=self.nk), target_shape=(self.norb, self.norb))
         for k in h_k.mesh:
             kx, ky, kz = k
@@ -243,18 +558,42 @@ class EliashbergSolver:
         wmesh_boson = MeshImFreq(beta=temperature_to_beta(self.T), S='Boson', n_max=self.n_w)
         wmesh_boson_kmesh = MeshProduct(wmesh_boson, g0_wk.mesh[1])
         
-        # Call calculate_gamma to set self.gamma_ph
+        # Call calculate_gamma to set self.gamma_ph and factorized parts
         self.calculate_gamma(wmesh_boson_kmesh, g0_wk.target_shape)
-        gamma_ph = self.gamma_ph # self.gamma_ph is set by calculate_gamma
+        
+        # Factorized Dyson solver
+        if hasattr(self, 'chi_wk') and hasattr(self, 'vertex_sum'):
+            chi_wr = chi_wr_from_chi_wk(self.chi_wk)
+            chi_tr = chi_tr_from_chi_wr(chi_wr, ntau=self.taumeshfactor*self.n_w+1)
+            del chi_wr
+            v_sum = self.vertex_sum
+            
+            def compute_sigma_tr(g_tr_data, chi_tr_data, v_sum, out_sigma_tr_data):
+                # sigma_tr[a,d] = g^2 * chi_tr * v_sum[a,b,c,d] * g_tr[b,c]
+                # chi_tr_data has 4 extra indices due to (1,1,1,1) shape
+                chi_scalar = chi_tr_data[:, :, 0, 0, 0, 0]
+                out_sigma_tr_data[:] = self.g**2 * np.einsum('tr,abcd,trbc->trad', chi_scalar, v_sum, g_tr_data)
 
-        gamma_wr = chi_wr_from_chi_wk(gamma_ph)
-        gamma_tr = chi_tr_from_chi_wr(gamma_wr, ntau=self.taumeshfactor*self.n_w+1)
+        else:
+            print("Warning: Factorized interaction not found. Falling back to gamma_ph if exists.")
+            if not hasattr(self, 'gamma_ph'):
+                 raise AttributeError("Interaction (gamma_ph or chi_wk) not found. Check calculate_gamma.")
+            gamma_wr = chi_wr_from_chi_wk(self.gamma_ph)
+            gamma_tr = chi_tr_from_chi_wr(gamma_wr, ntau=self.taumeshfactor*self.n_w+1)
+            del gamma_wr
+            def compute_sigma_tr(g_tr_data, gamma_tr_obj, v_sum, out_sigma_tr_data):
+                out_sigma_tr_data[:] = np.einsum('trabcd,trbc->trad', gamma_tr_obj.data, g_tr_data)
+            chi_tr = gamma_tr # hack to pass the object
+            v_sum = None
+
         g_wk = g0_wk.copy()
+
         # Dyson loop iter #1
         g_tr = self.fourier_wk_to_tr(g_wk)
+        
+        sigma_tr = g_tr.copy()
         if seed_sigma is None:
-            sigma_tr = g_tr.copy()
-            sigma_tr.data[:] = np.einsum('trabcd,trbc->trad', gamma_tr.data, g_tr.data)
+            compute_sigma_tr(g_tr.data, chi_tr.data, v_sum, sigma_tr.data)
             if zero_Gtau0:
                 sigma_tr.data[0] = 0.
             sigma_wk = self.fourier_tr_to_wk(sigma_tr)
@@ -262,22 +601,33 @@ class EliashbergSolver:
             sigma_wk = g_wk.copy()
             sigma_wk.data[:] = seed_sigma.data[:]
             sigma_tr = self.fourier_wk_to_tr(sigma_wk)
+
         if(self.fixed_density):
             self.mu=root_scalar(self.numbereqn,args=(h_k,sigma_wk),bracket=[-self.bandwidth,self.bandwidth],method='brentq',xtol=1e-3).root
+        
         g_wk = lattice_dyson_g_wk(mu=self.mu, e_k=h_k, sigma_wk=sigma_wk)
         residual = np.sum(np.abs(g0_wk.data - g_wk.data)) / self.nk**2 / self.norb
+        
         # Dyson loop iters #2..
         while np.abs(residual) > self.tol:
             g_tr = self.fourier_wk_to_tr(g_wk)
-            sigma_tr.data[:] = (1. - self.eps) * sigma_tr.data + self.eps * np.einsum('trabcd,trbc->trad', gamma_tr.data, g_tr.data)
+            
+            # New Sigma_tr calculation
+            new_sigma_tr_data = np.zeros_like(sigma_tr.data)
+            compute_sigma_tr(g_tr.data, chi_tr.data, v_sum, new_sigma_tr_data)
+
+            sigma_tr.data[:] = (1. - self.eps) * sigma_tr.data + self.eps * new_sigma_tr_data
+            
             if zero_Gtau0:
                 sigma_tr.data[0] = 0.
             sigma_wk = self.fourier_tr_to_wk(sigma_tr)
             oldg_wk = g_wk.copy()
+            
             if(self.fixed_density):
                 self.mu=root_scalar(self.numbereqn,args=(h_k,sigma_wk),bracket=[-self.bandwidth,self.bandwidth],method='brentq',xtol=1e-3).root
                 print(f"mu={self.mu}")
-            g_wk = lattice_dyson_g_wk(mu=self.mu if self.fixed_density else 0.0, e_k=h_k, sigma_wk=sigma_wk)
+            
+            g_wk = lattice_dyson_g_wk(mu=self.mu, e_k=h_k, sigma_wk=sigma_wk)
             residual = np.sum(np.abs(oldg_wk.data - g_wk.data)) / self.nk**2 / self.norb
             print(residual)
             self.sigma_wk = sigma_wk
@@ -288,71 +638,67 @@ class EliashbergSolver:
 
         self.sigma_wk = sigma_wk
         self.g_wk = g_wk
-        self.gamma_ph = gamma_ph
 
-        if not self.dyson_only:
-            gamma_pp = Gf(mesh=wmesh_boson_kmesh, target_shape=g0_wk.target_shape*2)
-            gamma_pp.data[:] = -2 * np.transpose(gamma_ph.data, axes=(0, 1, 2, 5, 4, 3)) #gamma_pp_abcd(k,k',q=0) = gamma_ph_adcb(q=k-k') # \times -2 because there is a -1/2 in the definition of the eliashberg product as implemented in solve_eliashberg 
-            self.En, self.vs = solve_eliashberg(gamma_pp, g_wk, symmetrize_fct=self.fermion_antisymmetrize, k=solncount)
-            print("Pair eigenvalues: ", self.En, " at ", datetime.datetime.now())
+        # if not self.dyson_only:
+        #     gamma_pp = Gf(mesh=wmesh_boson_kmesh, target_shape=g0_wk.target_shape*2)
+        #     gamma_pp.data[:] = -2 * np.transpose(gamma_ph.data, axes=(0, 1, 2, 5, 4, 3)) #gamma_pp_abcd(k,k',q=0) = gamma_ph_adcb(q=k-k') # \times -2 because there is a -1/2 in the definition of the eliashberg product as implemented in solve_eliashberg 
+        #     self.En, self.vs = solve_eliashberg(gamma_pp, g_wk, symmetrize_fct=self.fermion_antisymmetrize, k=solncount)
+        #     print("Pair eigenvalues: ", self.En, " at ", datetime.datetime.now())
 
     def twoparticle_GG(self, h_k=None, g_wk=None, add_linewidth=True):
+        """
+        Calculates S_{abcd}(k, iω) = G_{ac}(k, iω) G_{db}(-k, -iω).
+        If add_linewidth=False: Analytical calculation from h_k (static).
+        If add_linewidth=True: Numerical calculation from g_wk (dynamic).
+        """
+        beta = temperature_to_beta(self.T)
+        kmesh = h_k.mesh if h_k is not None else g_wk.mesh[1]
+        S_k = Gf(mesh=kmesh, target_shape=(self.norb, self.norb, self.norb, self.norb))
+        
         if not add_linewidth:
-            # Analytic calculation from h_k
-            kmesh = h_k.mesh
-            S_k = Gf(mesh=kmesh, target_shape=h_k.target_shape*2)
-            
+            # Static limit analytical calculation
             e_k = np.zeros((self.nk**2, self.norb))
             u_k = np.zeros((self.nk**2, self.norb, self.norb), dtype=complex)
             
-            for kid, k in enumerate(kmesh):
+            for kid in range(self.nk**2):
                 evals, evecs = eigh(h_k.data[kid])
                 e_k[kid] = evals
                 u_k[kid] = evecs
             
-            beta = temperature_to_beta(self.T)
+            inv_idx = self._inv_idx()
+            e_k_reshaped = e_k.reshape(self.nk, self.nk, self.norb)
+            u_k_reshaped = u_k.reshape(self.nk, self.nk, self.norb, self.norb)
             
-            e_k_minusk = np.zeros_like(e_k)
-            u_minusk = np.zeros_like(u_k)
-            
-            for kid, k in enumerate(kmesh):
-                minuskid = np.ravel_multi_index(_invert_momentum(np.unravel_index(kid, kmesh.dims), kmesh.dims), kmesh.dims)
-                e_k_minusk[kid] = e_k[minuskid]
-                u_minusk[kid] = u_k[minuskid]
+            e_mk = e_k_reshaped[inv_idx, :, :][:, inv_idx, :].reshape(self.nk**2, self.norb)
+            u_mk = u_k_reshaped[inv_idx, :, :, :][:, inv_idx, :, :].reshape(self.nk**2, self.norb, self.norb)
                 
-            E_sum = e_k[:, :, None] + e_k_minusk[:, None, :]
-            F = np.zeros_like(E_sum)
-            for kid in range(self.nk**2):
-                for m in range(self.norb):
-                    for mp in range(self.norb):
-                        diff = E_sum[kid, m, mp] - 2 * self.mu
-                        xi_k = e_k[kid, m] - self.mu
-                        xi_mk = e_k_minusk[kid, mp] - self.mu
-                        if np.abs(diff) < 1e-10:
-                            num = beta * np.exp(beta * xi_k) / (np.exp(beta * xi_k) + 1.)**2
-                            F[kid, m, mp] = num
-                        else:
-                            F[kid, m, mp] = (expit(-beta * -xi_mk) - expit(-beta * xi_k)) / diff
+            # Form-factor F_{m,m'}(k) = [f(-ξ_{-k, m'}) - f(ξ_{k, m})] / (ξ_{k, m} + ξ_{-k, m'} - 2μ)
+            E_sum = e_k[:, :, None] + e_mk[:, None, :] # (nk^2, norb, norb)
+            xi_k = e_k - self.mu
+            xi_mk = e_mk - self.mu
+            
+            # Vectorized F calculation
+            diff = E_sum - 2 * self.mu
+            # Avoid division by zero
+            safe_diff = np.where(np.abs(diff) < 1e-10, 1e-10, diff)
+            F = (expit(-beta * -xi_mk[:, None, :]) - expit(-beta * xi_k[:, :, None])) / safe_diff
+            # Handle diff=0 case (limit is beta * f' (xi))
+            F = np.where(np.abs(diff) < 1e-10, beta * np.exp(beta * xi_k[:, :, None]) / (np.exp(beta * xi_k[:, :, None]) + 1.)**2, F)
                             
-            S_data = np.einsum('kam,kpm,kbn,kqn,kmn->kapqb', u_k, u_k.conj(), u_minusk, u_minusk.conj(), F)
-            S_k.data[:] = S_data
-            return S_k
+            S_k.data[:] = np.einsum('kam,kpm,kbn,kqn,kmn->kapqb', u_k, u_k.conj(), u_mk, u_mk.conj(), F)
         else:
-            kmesh = g_wk.mesh[1]
-            S_k = Gf(mesh=kmesh, target_shape=g_wk.target_shape*2)
-            g_data = g_wk.data
+            # Dynamic calculation from Matsubara G
+            g_data = g_wk.data # shape: (2*n_w, nk^2, norb, norb)
+            inv_idx = self._inv_idx()
             
-            beta = temperature_to_beta(self.T)
+            g_reshaped = g_data.reshape(2 * self.n_w, self.nk, self.nk, self.norb, self.norb)
+            g_reversed = g_reshaped[::-1, inv_idx, :, :, :][:, :, inv_idx, :, :].reshape(2 * self.n_w, self.nk**2, self.norb, self.norb)
             
-            inv_idx = np.concatenate(([0], np.arange(self.nk - 1, 0, -1))).astype(int)
-            g_reshaped = g_data.reshape(g_data.shape[0], self.nk, self.nk, self.norb, self.norb)
-            g_inv_flip = g_reshaped[::-1, inv_idx, :, :, :][:, :, inv_idx, :, :]
-            g_reversed_flat = g_inv_flip.reshape(g_data.shape[0], self.nk**2, self.norb, self.norb)
-            
-            S_data = (1.0 / beta) * np.einsum('wkap,wkbq->kapqb', g_data, g_reversed_flat)
-            S_k.data[:] = S_data
-        
-            return S_k
+            # S_{ab,pq} = (1/beta) * sum_w G_{ap}(w,k) * G_{bq}(-w,-k)
+            # Since G(-w,-k) is effectively G_reversed
+            S_k.data[:] = (1.0 / beta) * np.einsum('wkap,wkbq->kapqb', g_data, g_reversed)
+    
+        return S_k
 
     def perform_fft_xy(self, tensor, dir='FFTW_FORWARD'):
         # Create aligned arrays for input and output
@@ -370,7 +716,7 @@ class EliashbergSolver:
         
         return output_array
 
-    def convolveDSV(self, S_k, V_kp, delta_k_flat):
+    def convolveDSV(self, S_k, V_kp, delta_k_flat, project_to=None):
         delta_dat = delta_k_flat.reshape(self.nk, self.nk, self.norb, self.norb)
         S_dat = S_k.data.reshape(self.nk, self.nk, *S_k.data.shape[1:])
         V_dat = V_kp.data.reshape(self.nk, self.nk, *V_kp.data.shape[1:])
@@ -380,12 +726,15 @@ class EliashbergSolver:
         V_r = self.perform_fft_xy(V_dat, dir='FFTW_BACKWARD')
         delta_out = self.perform_fft_xy(np.einsum('xyab,xycabd->xycd', deltaS_r, V_r), dir='FFTW_FORWARD')
 
-        # anti-symmetrize and flatten
-        delta_mk = np.roll(delta_out[::-1, ::-1], shift=1, axis=(0, 1))
-        delta_fixed = (delta_out - np.transpose(delta_mk, axes=(0, 1, 3, 2))) / 2
+        # fermion antisymmetrization
+        delta_fixed = self.fermion_antisymmetrize_static(delta_out)
+
+        if project_to is not None:
+             delta_fixed = project_delta(delta_fixed, project_to, apply_symmetry=self.apply_symmetry)
+
         return delta_fixed.reshape(delta_k_flat.size)
 
-    def solve_linearized_gap_static(self, add_linewidth=False, solncount=1, seed=None):
+    def solve_linearized_gap_static(self, add_linewidth=False, solncount=1, v0=None, tol=1e-8, project_to=None):
         h_k = Gf(mesh=MeshBrillouinZone(bz=BrillouinZone(BravaisLattice(units=np.eye(2))), n_k=self.nk), target_shape=(self.norb, self.norb))
         for k in h_k.mesh:
             kx, ky, kz = k
@@ -419,25 +768,349 @@ class EliashbergSolver:
             # g0_wk = lattice_dyson_g0_wk(mu=self.mu, e_k=h_k, mesh=wmesh)
             S_k = self.twoparticle_GG(h_k=h_k, add_linewidth=False)
             
-        np.random.seed(seed)
-        delta_k = Gf(mesh=kmesh, target_shape=h_k.target_shape)
-        delta_k.data[:] = np.random.random(h_k.data.shape[1:])
+        # Random initial guess
+        if v0 is None:
+            n_total = self.nk**2 * self.norb**2
+            v0 = np.random.random(n_total) + 0j
 
-        kernel_prod = functools.partial(self.convolveDSV, S_k, gamma_pp)
-        linop = LinearOperator(matvec=kernel_prod, dtype=complex, shape=(delta_k.data.size, delta_k.data.size))
-        Es, U = eigs(linop, k=solncount, which="LR", tol=1e-8, v0=delta_k.data.reshape(delta_k.data.size))
+        kernel_prod = functools.partial(self.convolveDSV, S_k, gamma_pp, project_to=project_to)
+        linop = LinearOperator(matvec=kernel_prod, dtype=complex, shape=(v0.size, v0.size))
+        Es, U = eigs(linop, k=solncount, which="LR", tol=tol, v0=v0)
         
         self.En_static = Es
         self.vs_static = U
         print("Pair eigenvalues: ", self.En_static, " at ", datetime.datetime.now())
         return Es, U
 
+    def solve_linearized_gap_dynamic(self, solncount=1, v0=None, tol=1e-8, init_with_static=False, project_to=None):
+        """
+        Solve the full dynamical linearized gap equation with memory optimizations.
+            Δ_{ab}(k,iω) = (1/βV) Σ_{k',iω'} V^pp_{aa''b''b}(k-k', iω-iω') ΔS_{a''b''}(k', iω')
+        where:
+            V^pp_{aa''b''b}(q,iΩ) = g² Σ_i σ^i_{aa''} χ_i(q,iΩ) (σ^i)^T_{b''b}
+            ΔS_{a''b''}(k',iω') = G_{a''a'}(k',iω') Δ_{a'b'}(k',iω') G^T_{b'b''}(-k',-iω')
+
+        Derivation:
+            (σ^i)^T_{b''b} = σ^i_{bb''}, so V^pp_{aa''b''b} = g²χ Σ_i σ^i_{aa''} σ^i_{bb''}
+            gamma_ph[a,a'',b,b''] = g²χ Σ_i σ^i_{aa''} σ^i_{bb''} = V^pp_{aa''b''b}
+            => V_pp = transpose(gamma_ph, (0,1,2,3,5,4))  [swap last two orbital indices]
+
+            G^T_{b'b''} = G_{b''b'}, so ΔS_{a''b''} = G_{a''a'} Δ_{a'b'} G_{b''b'}(-k,-ω)
+            => einsum('wkac,wkcd,wkbd->wkab', G, Δ, G_mk_mw)
+
+            Convolution in (τ,r): Δ_{ab} = V^pp_{a,a'',b'',b} ΔS_{a'',b''}
+            V^pp at positions [t,r, a, a'', b'', b] = [t,r, 2, 3, 4, 5]
+            Contract positions 3,4 (a'',b'') with ΔS. Output at 2,5 (a,b).
+            => einsum('trabcd,trbc->trad', V_pp_tr, DeltaS_tr)
+            [Same structure as Dyson: sigma_tr = einsum('trabcd,trbc->trad', gamma_tr, g_tr)]
+        """
+        if not hasattr(self, 'g_wk') or (not hasattr(self, 'gamma_ph') and not hasattr(self, 'chi_wk')):
+            print("Prerequisites not found. Running dyson_solver()...")
+            self.dyson_solver()
+            gc.collect()
+
+        g_wk = self.g_wk
+        
+        # Factorized interaction for GAP solver
+        if hasattr(self, 'chi_wk') and hasattr(self, 'vertex_sum'):
+            print("Using factorized interaction for GAP solver.")
+            chi_wr = chi_wr_from_chi_wk(self.chi_wk)
+            chi_tr = chi_tr_from_chi_wr(chi_wr, ntau=self.taumeshfactor*self.n_w+1)
+            del chi_wr
+            
+            # V^pp_{aa''b''b} = gamma_ph_{aa''bb''} = chi * vertex_sum_{aa''bb''}
+            # particle-particle vertex transformation: M^pp_{aa''b''b} = vertex_sum_{aa''bb''}
+            v_sum = self.vertex_sum
+            v_pp_sum = np.transpose(v_sum, axes=(0, 1, 3, 2))
+            
+            def apply_interaction(deltaS_tr_data):
+                # result[a,d] = g^2 * chi_tr * v_pp_sum[a,b,c,d] * deltaS_tr[b,c]
+                chi_scalar = chi_tr.data[:, :, 0, 0, 0, 0]
+                return self.g**2 * np.einsum('tr,abcd,trbc->trad', chi_scalar, v_pp_sum, deltaS_tr_data)
+
+        else:
+            print("Warning: Factorized interaction not found. Using full 6D tensor if exists.")
+            if not hasattr(self, 'gamma_ph'):
+                 raise AttributeError("Interaction (gamma_ph or chi_wk) not found.")
+            gamma_ph = self.gamma_ph
+            # Construct V^pp from gamma_ph: swap last two orbital indices
+            V_pp = gamma_ph.copy()
+            V_pp.data[:] = np.transpose(gamma_ph.data, axes=(0, 1, 2, 3, 5, 4))
+            V_pp_wr = chi_wr_from_chi_wk(V_pp)
+            del V_pp
+            V_pp_tr = chi_tr_from_chi_wr(V_pp_wr, ntau=self.taumeshfactor * self.n_w + 1)
+            del V_pp_wr
+            gc.collect()
+            
+            def apply_interaction(deltaS_tr_data):
+                return np.einsum('trabcd,trbc->trad', V_pp_tr.data, deltaS_tr_data)
+
+        # Precompute -k indices
+        kmesh = g_wk.mesh[1]
+        minusk_indices = np.array([
+            np.ravel_multi_index(
+                _invert_momentum(np.unravel_index(kid, kmesh.dims), kmesh.dims),
+                kmesh.dims
+            )
+            for kid in range(self.nk**2)
+        ])
+
+        # G(-k, -iω): reverse freq axis and apply -k index mapping
+        g_data = g_wk.data  # shape: (2*n_w, nk^2, norb, norb)
+        g_mk_mw = g_data[::-1][:, minusk_indices]  # G(-k, -iω)
+
+        # Workspace GFs to avoid repeated allocations in kernel_action
+        ws_wk = g_wk.copy()
+        
+        def kernel_action(delta_flat):
+            # 1. Multiply by Green's functions
+            delta_data = delta_flat.reshape(2 * self.n_w, self.nk**2, self.norb, self.norb)
+
+            # ΔS_{a''b''} = G_{a''a'} Δ_{a'b'} G_{b''b'}(-k,-ω)
+            deltaS_data = np.einsum('wkac,wkcd,wkbd->wkab', g_data, delta_data, g_mk_mw)
+
+            # 2. FFT to (τ,r)
+            ws_wk.data[:] = deltaS_data
+            deltaS_tr = self.fourier_wk_to_tr(ws_wk)
+
+            # 3. Vertex convolution
+            res_tr_data = apply_interaction(deltaS_tr.data)
+            
+            # Update deltaS_tr in-place
+            deltaS_tr.data[:] = res_tr_data
+            del res_tr_data
+
+            # 4. IFFT back to (w,k)
+            result_wk = self.fourier_tr_to_wk(deltaS_tr)
+            del deltaS_tr
+
+            # 5. Antisymmetrize
+            result_wk = self.fermion_antisymmetrize(result_wk)
+
+            if project_to is not None:
+                for i in range(2 * self.n_w):
+                    delta_k = result_wk.data[i].reshape(self.nk, self.nk, self.norb, self.norb)
+                    delta_proj = project_delta(delta_k, project_to, apply_symmetry=self.apply_symmetry)
+                    result_wk.data[i] = delta_proj.reshape(self.nk**2, self.norb, self.norb)
+
+            out = result_wk.data.reshape(delta_flat.size).copy()
+            del result_wk
+            return out
+
+        # Initial guess
+        if v0 is None:
+            n_total = 2 * self.n_w * self.nk**2 * self.norb * self.norb
+            if init_with_static:
+                if not hasattr(self, 'vs_static'):
+                    print("Solving static gap equation for initialization...")
+                    self.solve_linearized_gap_static()
+                
+                stride = self.nk**2 * self.norb**2
+                v0 = np.zeros(n_total, dtype=complex)
+                iw = np.arange(-self.n_w + 0.5, self.n_w + 0.5) * 2 * np.pi / temperature_to_beta(self.T)
+                for n, w in enumerate(iw):
+                    v0[n*stride:(n+1)*stride] = (1.0 / w**2) * self.vs_static[:, 0]
+            else:
+                v0 = np.random.random(n_total) + 0j
+
+        linop = LinearOperator(matvec=kernel_action, dtype=complex, shape=(v0.size, v0.size))
+        Es, U = eigs(linop, k=solncount, which="LR", tol=tol, v0=v0)
+
+        self.En_dynamic = Es
+        self.vs_dynamic = U
+        
+        # Final cleanup
+        if 'V_pp_tr' in locals(): del V_pp_tr
+        if 'chi_tr' in locals(): del chi_tr
+        gc.collect()
+        
+        print("Dynamic pair eigenvalues: ", self.En_dynamic, " at ", datetime.datetime.now())
+        return Es, U
+    def nonlinear_dynamic_gap_solver(self, seed_delta=None, seed_sigma=None, iterations=500, zero_Gtau0=True, tol=1e-5, project_to=None):
+        """
+        Solves for the Nambu-space self-energy self-consistently:
+        hat{Sigma}(k) = (g^2 / beta V) sum_{k',i} hat{V}^i G_Nambu(k') hat{V}^i chi_i(k-k')
+        where G_Nambu(k) = [iwn + mu*sigma3 - hat{H}(k) - hat{Sigma}(k)]^-1
+        """
+        print(f"Starting nonlinear_dynamic_gap_solver at {datetime.datetime.now()}", flush=True)
+        
+        if  self.fixed_density:
+            print("Warning: fixed_density is True, but this solver does not support it yet.")
+            
+        # 1. Mesh and Symmetry setup
+        beta = temperature_to_beta(self.T)
+        wmesh = MeshImFreq(beta=beta, S='Fermion', n_max=self.n_w)
+        kmesh = MeshBrillouinZone(bz=BrillouinZone(BravaisLattice(units=np.eye(2))), n_k=self.nk)
+        wmesh_boson = MeshImFreq(beta=beta, S='Boson', n_max=self.n_w)
+        wmesh_boson_kmesh = MeshProduct(wmesh_boson, kmesh)
+        
+        # Precompute -k indices
+        minusk_indices = np.array([
+            np.ravel_multi_index(
+                _invert_momentum(np.unravel_index(kid, (self.nk, self.nk)), (self.nk, self.nk)),
+                (self.nk, self.nk)
+            )
+            for kid in range(self.nk**2)
+        ])
+        
+        # 2. Hamiltonian in Nambu Space: [[h(k), 0], [0, -h(-k)^T]]
+        h_k_linear = np.zeros((self.nk**2, self.norb, self.norb), dtype=complex)
+        for kid, k in enumerate(kmesh):
+            h_k_linear[kid] = self.calculate_hk(*k)
+            
+        h_mk_T = h_k_linear[minusk_indices].transpose(0, 2, 1)
+        
+        H_Nambu = np.zeros((self.nk**2, 2*self.norb, 2*self.norb), dtype=complex)
+        H_Nambu[:, :self.norb, :self.norb] = h_k_linear
+        H_Nambu[:, self.norb:, self.norb:] = -h_mk_T
+        
+        # 3. Interaction in Nambu Space
+        self.calculate_gamma(wmesh_boson_kmesh, (self.norb, self.norb))
+        
+        # We need chi_scalar and v_sum_nambu. 
+        # If calculate_gamma didn't set self.chi_wk, we use self.gamma_ph
+        if hasattr(self, 'chi_wk') and self.chi_wk is not None:
+            chi_wr = chi_wr_from_chi_wk(self.chi_wk)
+            chi_tr = chi_tr_from_chi_wr(chi_wr, ntau=self.taumeshfactor*self.n_w+1)
+            # Handle potential shape difference (scalar vs (1,1,1,1))
+            if len(chi_tr.data.shape) > 2:
+                chi_scalar = chi_tr.data[:, :, 0, 0, 0, 0]
+            else:
+                chi_scalar = chi_tr.data
+        else:
+            # Fallback: recompute chi locally to be safe
+            chi_wk_local = Gf(mesh=wmesh_boson_kmesh, target_shape=(1, 1, 1, 1))
+            Qx, Qy = np.pi, np.pi
+            for iO, k in wmesh_boson_kmesh:
+                kx, ky, kz = k
+                chi_wk_local[iO,k][0,0,0,0] = self.Chi0/(1/self.Xi**2 + 2 * (2- np.cos(kx - Qx) - np.cos(ky - Qy)) + np.abs(iO.value) * self.gamma * (1+ (np.abs(iO.value))/(self.bandwidth)))
+            chi_wr = chi_wr_from_chi_wk(chi_wk_local)
+            chi_tr = chi_tr_from_chi_wr(chi_wr, ntau=self.taumeshfactor*self.n_w+1)
+            chi_scalar = chi_tr.data[:, :, 0, 0, 0, 0]
+            
+        if self.Vertices is not None:
+            nambu_vertices = []
+            for v in self.Vertices:
+                hat_V = np.zeros((2*self.norb, 2*self.norb), dtype=complex)
+                hat_V[:self.norb, :self.norb] = v
+                hat_V[self.norb:, self.norb:] = -v.T
+                nambu_vertices.append(hat_V)
+            
+            v_sum_nambu = np.zeros((2*self.norb,)*4, dtype=complex)
+            for v in nambu_vertices:
+                v_sum_nambu += np.tensordot(v, v, axes=0)
+        else:
+            # Reconstruct from self.vertex_sum if available, else recompute
+            v_sum = getattr(self, 'vertex_sum', None)
+            if v_sum is None:
+                v_sum = np.zeros((self.norb,)*4, dtype=complex)
+                for v in self.Vertices:
+                    v_sum += np.tensordot(v, v, axes=0)
+            
+            v_sum_nambu = np.zeros((2*self.norb,)*4, dtype=complex)
+            v_sum_nambu[:self.norb, :self.norb, :self.norb, :self.norb] = v_sum
+            v_sum_nambu[self.norb:, self.norb:, self.norb:, self.norb:] = np.transpose(v_sum, axes=(1,0,3,2))
+            v_sum_nambu[:self.norb, :self.norb, self.norb:, self.norb:] = -np.transpose(v_sum, axes=(0,1,3,2))
+            v_sum_nambu[self.norb:, self.norb:, :self.norb, :self.norb] = -np.transpose(v_sum, axes=(1,0,2,3))
+
+        # 4. Initialize Sigma and Delta
+        sigma_wk = Gf(mesh=MeshProduct(wmesh, kmesh), target_shape=(self.norb, self.norb))
+        if seed_sigma is not None: 
+            if hasattr(seed_sigma, 'data') and not isinstance(seed_sigma, np.ndarray):
+                sigma_wk.data[:] = seed_sigma.data[:]
+            else:
+                sigma_wk.data[:] = np.asarray(seed_sigma).reshape(sigma_wk.data.shape)
+        else:
+            # Seed with random noise
+            sigma_wk.data[:] = (np.random.random(sigma_wk.data.shape) - 0.5)
+        
+        delta_wk = Gf(mesh=MeshProduct(wmesh, kmesh), target_shape=(self.norb, self.norb))
+        if seed_delta is not None: 
+            if hasattr(seed_delta, 'data') and not isinstance(seed_delta, np.ndarray):
+                delta_wk.data[:] = seed_delta.data[:]
+            else:
+                delta_wk.data[:] = np.asarray(seed_delta).reshape(delta_wk.data.shape)
+        else:
+            # Seed with random noise
+            delta_wk.data[:] = (np.random.random(delta_wk.data.shape) - 0.5)
+        
+        # Helper GF for FFT
+        sn_wk = Gf(mesh=MeshProduct(wmesh, kmesh), target_shape=(2*self.norb, 2*self.norb))
+        mu_sigma3 = self.mu * np.diag([1]*self.norb + [-1]*self.norb)
+        
+        # 5. Iteration loop
+        for it in range(iterations):
+            # Construct Nambu Sigma: [[Sigma(k), Delta(k)], [Delta(k)^adj, -Sigma(-k)^T]]
+            sn_data = np.zeros((2*self.n_w, self.nk**2, 2*self.norb, 2*self.norb), dtype=complex)
+            s_data = sigma_wk.data
+            d_data = delta_wk.data
+            
+            sn_data[:, :, :self.norb, :self.norb] = s_data
+            sn_data[:, :, :self.norb, self.norb:] = d_data
+            sn_data[:, :, self.norb:, :self.norb] = d_data.conj().transpose(0, 1, 3, 2)
+            
+            s_mk_T = s_data[::-1][:, minusk_indices].transpose(0, 1, 3, 2)
+            sn_data[:, :, self.norb:, self.norb:] = -s_mk_T
+            
+            # Construct Nambu Ginv and Invert
+            iw = np.array([complex(m.value) for m in wmesh], dtype=complex).reshape(2*self.n_w, 1, 1, 1)
+            Ginv = (iw * np.eye(2*self.norb)).astype(complex) + mu_sigma3.reshape(1, 1, 2*self.norb, 2*self.norb) \
+                   - H_Nambu.reshape(1, self.nk**2, 2*self.norb, 2*self.norb) - sn_data
+            G_Nambu_data = np.linalg.inv(Ginv)
+            
+            # FFT to (tau, r)
+            sn_wk.data[:] = G_Nambu_data
+            g_tr = self.fourier_wk_to_tr(sn_wk)
+            
+            # Update Sigma in Time/Space: hat_Sigma_tr = g^2 * chi_tr * hat_V * G_tr * hat_V
+            new_sn_tr_data = self.g**2 * np.einsum('tr,abcd,trbc->trad', chi_scalar, v_sum_nambu, g_tr.data)
+            
+            if zero_Gtau0:
+                new_sn_tr_data[0] = 0.
+            
+            g_tr.data[:] = new_sn_tr_data
+            new_sn_wk = self.fourier_tr_to_wk(g_tr)
+            
+            # Extract new Sigma and Delta
+            new_sn_wk_data = new_sn_wk.data
+            
+            old_sigma = sigma_wk.data.copy()
+            old_delta = delta_wk.data.copy()
+            
+            sigma_wk.data[:] = new_sn_wk_data[:, :, :self.norb, :self.norb]
+            delta_wk.data[:] = new_sn_wk_data[:, :, :self.norb, self.norb:]
+            
+            # Antisymmetrize Delta
+            delta_wk = self.fermion_antisymmetrize(delta_wk)
+            
+            if project_to is not None:
+                for i in range(2 * self.n_w):
+                    delta_k = delta_wk.data[i].reshape(self.nk, self.nk, self.norb, self.norb)
+                    delta_proj = project_delta(delta_k, project_to, apply_symmetry=self.apply_symmetry)
+                    delta_wk.data[i] = delta_proj.reshape(self.nk**2, self.norb, self.norb)
+            
+            resid_s = np.sum(np.abs(sigma_wk.data - old_sigma)) / sigma_wk.data.size
+            resid_d = np.sum(np.abs(delta_wk.data - old_delta)) / delta_wk.data.size
+            max_d = np.max(np.abs(delta_wk.data))
+            print(f"  Iteration {it}: resid_sigma = {resid_s:.2e}, resid_delta = {resid_d:.2e}, max_delta = {max_d:.2e}", flush=True)
+            
+            if resid_s < tol and resid_d < tol:
+                 print("Converged!", flush=True)
+                 break
+        
+        self.sigma_wk = sigma_wk
+        self.delta_wk = delta_wk
+        
+        h_k = Gf(mesh=kmesh, target_shape=(self.norb, self.norb))
+        h_k.data[:] = h_k_linear.reshape(h_k.data.shape)
+        self.g_wk = lattice_dyson_g_wk(mu=self.mu, e_k=h_k, sigma_wk=sigma_wk)
+        print(f"Completed nonlinear_dynamic_gap_solver at {datetime.datetime.now()}", flush=True)
+
+
 # implements a minimal model of a square lattice with two orbitals, no SOC
 class SquareLattice(EliashbergSolver):
-    def __init__(self, nk=16, n_w=1024, g=2.0, T=100.0, mu=-1.0, filling=0.7, fixed_density=False, **kwargs):
+    def __init__(self, nk=16, n_w=1024, g=2.0, T=100.0, mu=-1.0, filling=0.7, fixed_density=False, Vertices=sigma[1:], **kwargs):
         # 2-orbital spinful model (Pauli x,y,z only)
-        # Vertices passed are only the interaction vertices
-        vertices = sigma[1:]
         
         # Susceptibility parameters 
         self.Chi0  = 1.0 
@@ -451,7 +1124,7 @@ class SquareLattice(EliashbergSolver):
             T=T, 
             mu=mu, 
             norb=2, 
-            Vertices=vertices, 
+            Vertices=Vertices, 
             g=g,
             filling=filling,
             fixed_density=fixed_density,
@@ -465,6 +1138,53 @@ class SquareLattice(EliashbergSolver):
         # Construct identity locally since it's not in Vertices
         epsilon = -2 * self.t * (np.cos(k1) + np.cos(k2)) - 4 * self.tp * np.cos(k1) * np.cos(k2)
         return epsilon * np.eye(2)
+
+    # -----------------------------------------------------------------------
+    # Symmetry definitions for Square Lattice (D4h - 16 operations)
+    # -----------------------------------------------------------------------
+    def _k_transforms(self):
+        inv = self._inv_idx()
+        return {
+            'identity':     lambda d: d,
+            'inversion':    lambda d: d[inv][:, inv],
+            'sigma_x':      lambda d: d[inv, :],
+            'sigma_y':      lambda d: d[:, inv],
+            'sigma_d':      lambda d: d.transpose(1, 0, 2, 3),                            # (x,y) -> (y,x)
+            'sigma_dp':     lambda d: d[inv][:, inv].transpose(1, 0, 2, 3),               # (x,y) -> (-y,-x)
+            'C2z':          lambda d: d[inv][:, inv],
+            'C4z_anti':     lambda d: d[:, inv].transpose(1, 0, 2, 3),                    # (x,y) -> (-y,x) (anti)
+            'C4z_clock':    lambda d: d[inv, :].transpose(1, 0, 2, 3),                    # (x,y) -> (y,-x) (clock)
+            'S4':           lambda d: d[:, inv].transpose(1, 0, 2, 3),                    # (x,y) -> (-y,x) (anti spatially)
+            'S4_inv':       lambda d: d[inv, :].transpose(1, 0, 2, 3),                    # (x,y) -> (y,-x) (clock spatially)
+            'C2x':          lambda d: d[:, inv],                                          # (x,y) -> (x,-y)
+            'C2y':          lambda d: d[inv, :],                                          # (x,y) -> (-x,y)
+            'C2_xplusy':    lambda d: d.transpose(1, 0, 2, 3),                            # (x,y) -> (y,x)
+            'C2_xminusy':   lambda d: d[inv][:, inv].transpose(1, 0, 2, 3),               # (x,y) -> (-y,-x)
+            'sigma_h':      lambda d: d,
+        }
+
+    # Unitaries for SquareLattice (Spinful)
+    def _U_identity(self):    return sigma[0]
+    def _U_inversion(self):   return sigma[0]
+    
+    def _U_sigma_x(self):     return -1j * sigma[1]
+    def _U_sigma_y(self):     return -1j * sigma[2]
+    def _U_sigma_d(self):     return (-1j / np.sqrt(2.0)) * (sigma[1] - sigma[2])
+    def _U_sigma_dp(self):    return (-1j / np.sqrt(2.0)) * (sigma[1] + sigma[2])
+    
+    def _U_sigma_h(self):     return -1j * sigma[3]
+    def _U_C2z(self):         return -1j * sigma[3]
+    
+    def _U_C4z_anti(self):    return (sigma[0] - 1j * sigma[3]) / np.sqrt(2.0)
+    def _U_C4z_clock(self):   return (sigma[0] + 1j * sigma[3]) / np.sqrt(2.0)
+    
+    def _U_S4(self):          return self._U_sigma_h() @ self._U_C4z_anti()
+    def _U_S4_inv(self):      return self._U_sigma_h() @ self._U_C4z_clock()
+    
+    def _U_C2x(self):         return -1j * sigma[1]
+    def _U_C2y(self):         return -1j * sigma[2]
+    def _U_C2_xplusy(self):   return (-1j / np.sqrt(2.0)) * (sigma[1] + sigma[2])
+    def _U_C2_xminusy(self):  return (-1j / np.sqrt(2.0)) * (sigma[1] - sigma[2])
 
     def calculate_gamma(self, wmesh_boson_kmesh, target_shape):
         """
@@ -547,15 +1267,16 @@ class SquareLattice(EliashbergSolver):
 
         return fig, ax
 
-    def plot_delta(self):
-        """Plot the gap Δ(k) using the 1-orbital plotting function.
-        This extracts the singlet and triplet components and plots the dominant ones.
-        """
-        if not hasattr(self, 'vs'):
-            raise ValueError("No gap eigenvector available. Run solver() first.")
-
-        Delta = prep_for_plot_Delta_1orb(self.vs[0], self.nk, self.norb)
-        plot_Gamma_1orb(Delta, self.nk)
+    def plot_delta(self,oddfreq=False):
+        """Plot the gap Δ(k) projected into 1-orbital singlet/triplet components."""
+        if hasattr(self, 'delta_wk') and self.delta_wk is not None:
+            Gamma = prep_for_plot_Delta_1orb(self.delta_wk, self.nk, self.norb, oddfreq=oddfreq, n_w=self.n_w)
+        elif hasattr(self, 'vs_dynamic'):
+            Gamma = prep_for_plot_Delta_1orb(self.vs_dynamic[:,0], self.nk, self.norb, oddfreq=oddfreq, n_w=self.n_w)
+        else:
+            raise ValueError("No dynamic gap available. Run solve_linearized_gap_dynamic() or nonlinear_dynamic_gap_solver() first.")
+        
+        plot_Gamma_1orb(Gamma, self.nk)
 
     def plot_deltaMF(self, vs=None, idx=0):
         """Plot the static mean-field gap Δ(k)."""
@@ -668,10 +1389,19 @@ class SquareLattice(EliashbergSolver):
         ax.grid(True, axis='y', alpha=0.3)
         plt.tight_layout()
 if __name__ == '__main__':
+    print("--- Running SquareLattice Minimal Model Test ---")
     SqLat = SquareLattice(fixed_density=True, n_w=1024, filling=0.6, g=2.)
-    SqLat.solver()
-    SqLat.plot_bandstructure()
-    SqLat.plot_fermi_surface(nkmesh=64)
-    SqLat.plot_quasiparticle_weight()
-    SqLat.plot_delta()
+    
+    print("\nSolving Dyson Equation...")
+    SqLat.dyson_solver()
+    
+    print("\nSolving Linearized Gap Equation (Dynamic)...")
+    SqLat.solve_linearized_gap_dynamic()
+    
+    print("\n--- Minimal Story ---")
+    print(f"Run Parameters: fixed_density=True, n_w=1024, filling={SqLat.filling}, g={SqLat.g}")
+    print(f"Leading Eigenvalues: {SqLat.En_dynamic}")
+    
+    print("\nLeading Eigenvector Symmetry Analysis:")
+    SqLat.check_symmetries(verbose=True)
 
