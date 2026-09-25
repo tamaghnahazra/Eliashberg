@@ -29,9 +29,14 @@ This manual catalogs the core codebase: `LinearizedEliashberg.py` and `Eliashber
 #### `EliashbergSolver`
 General backbone for N-orbital interacting solvers with FFT-optimized self-consistent Dyson and gap equations.
 
+#### CONFIGURATION PROPERTIES
+* `Q_factors` --- Optional list of momentum peak coordinates (e.g., `[2*np.pi*0.3, (0.0, 0.0), (0.0, 0.0)]`) assigned per fluctuation channel. If not provided, falls back to the default incommensurate $\mathbf{Q} \approx (0.3, 0.3)2\pi$.
+* `Xi_factors` --- Optional list of correlation lengths $\xi$ assigned per fluctuation channel. If not provided, falls back to the default experimental fit value $\xi = 2.58$.
+* `form_factors` --- Optional list of lambda functions defining custom momentum structures per channel (e.g. `lambda kx, ky: np.ones_like(kx)` for flat).
+
 #### CORE
 * `dyson_solver(seed_sigma=None, zero_Gtau0=True)` --- Solves the Dyson loop self-consistently for $\Sigma$; `seed_sigma` provides a warm start, `zero_Gtau0=True` constrains $G(\tau=0)=0$ to remove Hartree shifts at all $i\omega_n$.
-* `solve_linearized_gap_static(add_linewidth=False, solncount=1, v0=None, tol=1e-8, project_to=None)` --- Finds gap eigenvalues; `add_linewidth=True` adds a quasiparticle lifetime by using dynamical $G(k, \omega)$, `v0` is an optional initial guess, and `project_to` restricts the solver to a specific Irrep.
+* `solve_linearized_gap_static(has_lifetime=False, solncount=1, v0=None, tol=1e-8, project_to=None)` --- Finds gap eigenvalues for the static gap equation. When `has_lifetime=False`, computes the pairing bubble analytically from the non-interacting dispersion $H(\mathbf{k})$ (exact infinite frequency sum). When `has_lifetime=True`, performs a numerical Matsubara summation over the dynamical Green's function $G(\mathbf{k}, i\omega_n)$ (`g_wk`), accounting for finite quasiparticle lifetimes from the self-energy $\Sigma(\mathbf{k}, i\omega_n)$ if present. `v0` is an optional initial guess, and `project_to` restricts the solver to a specific Irrep.
 * `solve_linearized_gap_dynamic(solncount=1, v0=None, tol=1e-8, init_with_static=False, project_to=None)` --- Power iteration for the dynamical gap; `init_with_static=True` uses the static result to accelerate convergence.
 * `nonlinear_dynamic_gap_solver(seed_delta=None, seed_sigma=None, iterations=500, zero_Gtau0=True, tol=1e-5, project_to=None)` --- Coupled gap and self-energy Nambu solver; `seed_delta`/`seed_sigma` provide warm starts (else initialized with noise), `iterations` sets the max loop count, and `project_to` enforces symmetry at each step.
 * `calculate_hk(k1, k2, k3)` --- Abstract placeholder for subclass to define the model-specific tight-binding Hamiltonian.
@@ -43,7 +48,7 @@ General backbone for N-orbital interacting solvers with FFT-optimized self-consi
 * `fermion_antisymmetrize(Delta)` --- Enforces the required exchange symmetry $\Delta_{ab}(k, \omega) = -\Delta_{ba}(-k, -\omega)$.
 * `apply_symmetry(op, Delta_k)` --- Transforms the gap matrix using model-specific symmetry unitaries (e.g., `op='sigma_d'`).
 * `check_symmetries(eigvec, threshold, verbose)` --- Scans all point-group operations and prints characters, compares with the character table to identify the Irrep.
-* `twoparticle_GG(h_k, g_wk, add_linewidth=True)` --- Computes the pairing bubble; `add_linewidth=True` adds a quasiparticle lifetime and uses numerical frequency sums, otherwise sums statically over $H_k$.
+* `twoparticle_GG(h_k, g_wk, has_lifetime=True)` --- Computes the pairing bubble $S(\mathbf{k})$. When `has_lifetime=False`, computes the exact analytic Matsubara sum over non-interacting band energies $H(\mathbf{k})$. When `has_lifetime=True`, performs a numerical Matsubara sum over dynamical $G(\mathbf{k}, i\omega_n)$, incorporating the dressed self-energy / quasiparticle lifetime when available.
 
 #### `SquareLattice` (Derived from `EliashbergSolver`)
 Single-band implementation on a square lattice with spin-fluctuation interaction.

@@ -10,7 +10,88 @@ from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 from IPython.display import display, Math
 
-from LinearizedEliashberg import EliashbergSolver, get_all_characters, get_max_abs_values, character, character_weighted, sigma, pi
+from LinearizedEliashberg import EliashbergSolver, sigma, pi
+
+def compute_paramagnon_form_factor(kx, ky, Q, Xi):
+    """
+    Vectorized computation of the 2D square-lattice paramagnon momentum form factor on momentum grid (kx, ky).
+    Supports scalar Q (peaks at (±Q, ±Q)) or explicit peak coordinates.
+    """
+    # TODO: In the future, this Q-parsing logic should be combined with the dynamic solver to reduce code duplication.
+    # Determine ordering wavevector peaks Q based on input type
+    if np.isscalar(Q):
+        if np.isclose(Q, 0.0):
+            q_peaks = [(0.0, 0.0)]  # Uniform / ferro order at Gamma
+        else:
+            q_peaks = [(+Q, +Q), (+Q, -Q), (-Q, +Q), (-Q, -Q)]  # 4-fold symmetric peaks
+    elif isinstance(Q, (tuple, list, np.ndarray)) and len(Q) == 2 and np.isscalar(Q[0]):
+        qx, qy = Q[0], Q[1]
+        if np.isclose(qx, 0.0) and np.isclose(qy, 0.0):
+            q_peaks = [(0.0, 0.0)]  # Uniform / ferro order
+        else:
+            q_peaks = list({(+qx, +qy), (+qx, -qy), (-qx, +qy), (-qx, -qy)})  # Symmetrized wavevector peaks
+    else:
+        q_peaks = list(Q) if isinstance(Q, (list, tuple)) else [(0.0, 0.0)]  # Explicit peak list
+
+    # Sum 2D square lattice paramagnon Lorentzian contributions over all peaks
+    inv_xi2 = 1.0 / (Xi**2)
+    chi = np.zeros_like(kx, dtype=float)
+    for qx, qy in q_peaks:
+        denom = inv_xi2 + 2.0 * (2.0 - np.cos(kx - qx) - np.cos(ky - qy))
+        chi += 1.0 / denom
+    return chi / float(len(q_peaks))  # Normalized average over peaks
+
+def character_weighted(kFF, nk):
+    """
+    Calculate the symmetry characters of a k-space form factor using weighting.
+
+    This function determines the characters for Inversion, Vertical Mirror, 
+    and Diagonal Mirror operations. Instead of just signs, it uses a weighted
+    overlap to provide a smoother and more robust estimate of the symmetry 
+    character, especially near nodes.
+
+    Parameters:
+    -----------
+    kFF : 2D numpy array
+        The k-space form factor matrix, shape (nk, nk).
+    nk : int
+        The number of k-points along one dimension.
+
+    Returns:
+    --------
+    list of floats
+        The characters [inv, sv, sd], where each value is in the range [-1.0, 1.0].
+    """
+    inv = np.mean([kFF[nk-i, nk-j] * kFF[i, j] / (((np.abs(kFF[nk-i, nk-j]) + np.abs(kFF[i, j])) / 2)**2) 
+                   for i in range(1, kFF.shape[0]) for j in range(1, kFF.shape[1]) 
+                   if i != j and i != nk-j and i != nk/2-1 and j != nk/2-1])
+    sv = np.mean([kFF[i, nk-j] * kFF[i, j] / (((np.abs(kFF[i, nk-j]) + np.abs(kFF[i, j])) / 2)**2) 
+                  for i in range(1, kFF.shape[0]) for j in range(1, kFF.shape[1]) 
+                  if i != j and i != nk-j and i != nk/2-1 and j != nk/2-1])
+    sd = np.mean([kFF[j, i] * kFF[i, j] / (((np.abs(kFF[j, i]) + np.abs(kFF[i, j])) / 2)**2) 
+                  for i in range(1, kFF.shape[0]) for j in range(1, kFF.shape[1]) 
+                  if i != j and i != nk-j and i != nk/2-1 and j != nk/2-1])
+    return [inv, sv, sd]
+
+def get_all_characters(Gamma, nk):
+    """Get the weighted symmetry characters of all elements in Gamma."""
+    characters = []
+    for group in Gamma:
+        group_characters = []
+        for element in group:
+            group_characters.append(character_weighted(element, nk))
+        characters.append(group_characters)
+    return characters
+
+def get_max_abs_values(Gamma):
+    """Get the maximum absolute values of all elements in Gamma."""
+    max_abs_values = []
+    for group in Gamma:
+        group_max_abs = []
+        for element in group:
+            group_max_abs.append(np.max(np.abs(element)))
+        max_abs_values.append(group_max_abs)
+    return max_abs_values
 
 GellMannMatrix = [None] * 9
 #basis is yz, xz, xy
@@ -60,6 +141,38 @@ LocalSpinOrbital_list = [
     [r"$L_{z}$",r"$\mathbb{I}_{xz|yz}S_{z}$",r"$\sqrt{2}\mathbb{I}_{xy}S_{z}$",r"$L_{x}S_{y}-L_{y}S_{x}$",r"$Q_{yz}S_{y}+Q_{xz}S_{x}$"],
     [r"$-Q_{x^{2}-y^{2}}$",r"$L_{x}S_{x}-L_{y}S_{y}$",r"$Q_{yz}S_{x}+Q_{xz}S_{y}$",r"$Q_{xy}S_{z}$"],
     [r"$Q_{xy}$",r"$L_{x}S_{y}+L_{y}S_{x}$",r"$Q_{yz}S_{y}-Q_{xz}S_{x}$"]
+    ]
+
+# All 36 t2g spin-orbital pairing matrices, partitioned by D2h irrep.
+# Ordering within each group follows the GellMann index (0..8).
+LocalSpinOrbital_list_D2h = [
+    # Ag
+    [r"$\mathbb{I}_{xz|yz}$", r"$Q_{xy}S_{z}$", r"$L_{z}S_{z}$",
+     r"$-Q_{x^{2}-y^{2}}$", r"$\sqrt{2}\mathbb{I}_{xy}$",
+     r"$Q_{xz}S_{y}$", r"$L_{y}S_{y}$", r"$Q_{yz}S_{x}$", r"$L_{x}S_{x}$"],
+    # B1g
+    [r"$\mathbb{I}_{xz|yz}S_{z}$", r"$Q_{xy}$", r"$L_{z}$",
+     r"$-Q_{x^{2}-y^{2}}S_{z}$", r"$\sqrt{2}\mathbb{I}_{xy}S_{z}$",
+     r"$Q_{xz}S_{x}$", r"$L_{y}S_{x}$", r"$Q_{yz}S_{y}$", r"$L_{x}S_{y}$"],
+    # B2g
+    [r"$\mathbb{I}_{xz|yz}S_{y}$", r"$Q_{xy}S_{x}$", r"$L_{z}S_{x}$",
+     r"$-Q_{x^{2}-y^{2}}S_{y}$", r"$\sqrt{2}\mathbb{I}_{xy}S_{y}$",
+     r"$Q_{xz}$", r"$L_{y}$", r"$Q_{yz}S_{z}$", r"$L_{x}S_{z}$"],
+    # B3g
+    [r"$\mathbb{I}_{xz|yz}S_{x}$", r"$Q_{xy}S_{y}$", r"$L_{z}S_{y}$",
+     r"$-Q_{x^{2}-y^{2}}S_{x}$", r"$\sqrt{2}\mathbb{I}_{xy}S_{x}$",
+     r"$Q_{xz}S_{z}$", r"$L_{y}S_{z}$", r"$Q_{yz}$", r"$L_{x}$"],
+    ]
+
+Irreps_D2h = [r"$A_{g}$", r"$B_{1g}$", r"$B_{2g}$", r"$B_{3g}$"]
+
+# (GellMann index, sigma index) for each entry above -- the D2h analogue of
+# get_Gamma's hard-coded slicing.
+LocalSpinOrbital_indices_D2h = [
+    [(0,0), (1,3), (2,3), (3,0), (4,0), (5,2), (6,2), (7,1), (8,1)],  # Ag
+    [(0,3), (1,0), (2,0), (3,3), (4,3), (5,1), (6,1), (7,2), (8,2)],  # B1g
+    [(0,2), (1,1), (2,1), (3,2), (4,2), (5,0), (6,0), (7,3), (8,3)],  # B2g
+    [(0,1), (1,2), (2,2), (3,1), (4,1), (5,3), (6,3), (7,0), (8,0)],  # B3g
     ]
 
 Irreps = [
@@ -119,6 +232,12 @@ def get_Gamma(LScomponents):
     B2g = [LScomponents[:,:,1,0],LScomponents[:,:,8,2]-LScomponents[:,:,6,1],LScomponents[:,:,7,2]-LScomponents[:,:,5,1]]
     return A1g,A2g,B1g,B2g
 
+
+# D2h counterpart of get_Gamma: groups the LS components by D2h irrep.
+# Unlike get_Gamma (17 of 36 components, D4h gerade only) this is a complete
+# partition of all 36
+def get_Gamma_D2h(LScomponents):
+    return [[LScomponents[:, :, i, j] for i, j in group] for group in LocalSpinOrbital_indices_D2h]
 
 # decompose a k-space form factor into symmetry components
 # input: rank-4 tensor of kFF(kx,ky,i,j)
@@ -244,7 +363,7 @@ def prep_for_plot_Delta(vs, nw, nk, norb, oddfreq=False):
 # and weights of the form-factors, truncated at 1% of max
 # and nearest character of the 
 # and plot of Gamma
-def plot_Gamma(Gamma,nk,uniform_colorbar=False, round_character=True):
+def plot_Gamma(Gamma, nk, uniform_colorbar=False):
     max_abs_values = get_max_abs_values(Gamma)
     # Find the maximum value and its index in max_abs_values
     max_value = max(max(max_abs_values, key=max))
@@ -279,7 +398,7 @@ def plot_Gamma(Gamma,nk,uniform_colorbar=False, round_character=True):
         max_values_list.append(next_max_value)
         current_max_value = next_max_value
 
-    print(f"Indices and sub-indices of values until less than max_value/100: {indices_list}")
+    print(f"Indices and sub-indices of values until less than max_value/1000: {indices_list}")
     print(f"Corresponding max values: {max_values_list}")
 
     fig, axs = plt.subplots(1, len(indices_list), figsize=(5*len(indices_list), 5))
@@ -294,10 +413,7 @@ def plot_Gamma(Gamma,nk,uniform_colorbar=False, round_character=True):
 
     for idx, (max_index, sub_index) in enumerate(indices_list):
         ax = axs[idx]
-        if round_character:
-            target = np.array(character(Gamma[max_index][sub_index],nk))
-        else:
-            target = np.array(character_weighted(Gamma[max_index][sub_index],nk))
+        target = np.array(character_weighted(Gamma[max_index][sub_index], nk))
         closest_key = None
         closest_distance = np.inf
 
@@ -333,7 +449,7 @@ def plot_Gamma(Gamma,nk,uniform_colorbar=False, round_character=True):
 
 # implements bandstructure from Stangier, Berg, Schmalian, no SOC
 class SBSSr2RuO4(EliashbergSolver):
-    def __init__(self, nk=12, n_w=1024, T=700., mu=0., Xi=2.58, Q=2*pi*0.3, g=1.36/np.sqrt(3), eps_xx=0.0, nu_xy=0.39, alpha=1.0, beta=1.0, norb=6, Vertices=None, **kwargs):
+    def __init__(self, nk=12, n_w=1024, T=700., mu=0., Xi=2.58, Q=2*pi*0.3, g=1.36/np.sqrt(3), eps_xx=0.0, nu_xy=0.5211065, alpha=7.499736, beta=7.499736, lambda_soc=0.0, norb=6, Vertices=None, **kwargs):
         if Vertices is None:
              Vertices = L0sigma[1:] # Default to spin-interaction vertices only
 
@@ -342,10 +458,12 @@ class SBSSr2RuO4(EliashbergSolver):
         self.nu_xy = nu_xy
         self.alpha = alpha
         self.beta = beta
+        self.lambda_soc = lambda_soc
         
         # Band structure parameters (unstrained) from Appendix B
         self.t1 = 0.119       # eV
-        self.t4 = 0.41 * self.t1   # eV
+        # Updated t4 to 0.392 * t1 to match SROGammaBandOnlyWithStrain.
+        self.t4 = 0.392 * self.t1   # eV
         self.mu_xy = 1.48 * self.t1
 
         self.t2 = 0.165       # eV
@@ -426,31 +544,95 @@ class SBSSr2RuO4(EliashbergSolver):
             [0.0,    0.0,     eps_xy],
         ], dtype=float)
 
-        return np.kron(hk, np.eye(2))
+        hk_spin = np.kron(hk, np.eye(2))
+        
+        soc = (
+            self.lambda_soc * np.kron(ell[1], sigma[1]) +
+            self.lambda_soc * np.kron(ell[2], sigma[2]) +
+            self.lambda_soc * np.kron(ell[3], sigma[3])
+        )
+
+        return hk_spin + soc
+
+    def calculate_hk_vectorized(self, kx, ky, kz):
+        """
+        Vectorized version of calculate_hk for arrays kx, ky.
+        """
+        t1x, t1y, t4_eff, t2x, t2y, t3x, t3y, t5_eff = \
+            self.tight_binding_parameters_strain(self.eps_xx, self.nu_xy, self.alpha, self.beta)
+
+        eps_xy = (
+            -2.0 * t1x * np.cos(kx)
+            -2.0 * t1y * np.cos(ky)
+            -2.0 * t4_eff * np.cos(kx + ky)
+            -2.0 * t4_eff * np.cos(kx - ky)
+            - self.mu_xy
+        )
+
+        eps_xz = (
+            self.eps0_x
+            - 2.0 * t2x * np.cos(kx)
+            - 2.0 * t3y * np.cos(ky)
+        )
+        eps_yz = (
+            self.eps0_y
+            - 2.0 * t2y * np.cos(ky)
+            - 2.0 * t3x * np.cos(kx)
+        )
+        V_k = (
+            -2.0 * t5_eff * np.cos(kx + ky)
+            + 2.0 * t5_eff * np.cos(kx - ky)
+        )
+
+        # Build the 3x3 matrices for all kx, ky points
+        hk = np.zeros(kx.shape + (3, 3), dtype=float)
+        hk[..., 0, 0] = eps_yz
+        hk[..., 0, 1] = V_k
+        hk[..., 1, 0] = V_k
+        hk[..., 1, 1] = eps_xz
+        hk[..., 2, 2] = eps_xy
+
+        # Kronecker product with np.eye(2)
+        # We can do this with einstein summation or reshaping
+        eye2 = np.eye(2, dtype=float)
+        hk_spin = np.einsum('...ij,kl->...ikjl', hk, eye2).reshape(kx.shape + (6, 6))
+        
+        soc = (
+            self.lambda_soc * np.kron(ell[1], sigma[1]) +
+            self.lambda_soc * np.kron(ell[2], sigma[2]) +
+            self.lambda_soc * np.kron(ell[3], sigma[3])
+        )
+
+        return hk_spin + soc
 
     # -----------------------------------------------------------------------
     # Symmetry definitions for SBSSr2RuO4 (SRO) - D4h 16 operations
     # -----------------------------------------------------------------------
     def _k_transforms(self):
         inv = self._inv_idx()
-        return {
+        ops = {
             'identity':     lambda d: d,
             'inversion':    lambda d: d[inv][:, inv],
             'sigma_x':      lambda d: d[inv, :],
             'sigma_y':      lambda d: d[:, inv],
-            'sigma_d':      lambda d: d.transpose(1, 0, 2, 3),                            # (x,y) -> (y,x)
-            'sigma_dp':     lambda d: d[inv][:, inv].transpose(1, 0, 2, 3),               # (x,y) -> (-y,-x)
             'C2z':          lambda d: d[inv][:, inv],
-            'C4z_anti':     lambda d: d[:, inv].transpose(1, 0, 2, 3),                    # (x,y) -> (-y,x) (anti)
-            'C4z_clock':    lambda d: d[inv, :].transpose(1, 0, 2, 3),                    # (x,y) -> (y,-x) (clock)
-            'S4':           lambda d: d[:, inv].transpose(1, 0, 2, 3),                    # (x,y) -> (-y,x) (anti spatially)
-            'S4_inv':       lambda d: d[inv, :].transpose(1, 0, 2, 3),                    # (x,y) -> (y,-x) (clock spatially)
-            'C2x':          lambda d: d[:, inv],                                          # (x,y) -> (x,-y)
-            'C2y':          lambda d: d[inv, :],                                          # (x,y) -> (-x,y)
-            'C2_xplusy':    lambda d: d.transpose(1, 0, 2, 3),                            # (x,y) -> (y,x)
-            'C2_xminusy':   lambda d: d[inv][:, inv].transpose(1, 0, 2, 3),               # (x,y) -> (-y,-x)
+            'C2x':          lambda d: d[:, inv],                                   # (x,y) -> (x,-y)
+            'C2y':          lambda d: d[inv, :],                                   # (x,y) -> (-x,y)
             'sigma_h':      lambda d: d,
         }
+        if self.eps_xx == 0.0:
+            # x <-> y operations: symmetries only in the unstrained (D4h) crystal
+            ops.update({
+                'sigma_d':      lambda d: d.transpose(1, 0, 2, 3),                 # (x,y) -> (y,x)
+                'sigma_dp':     lambda d: d[inv][:, inv].transpose(1, 0, 2, 3),    # (x,y) -> (-y,-x)
+                'C4z_anti':     lambda d: d[:, inv].transpose(1, 0, 2, 3),         # (x,y) -> (-y,x)
+                'C4z_clock':    lambda d: d[inv, :].transpose(1, 0, 2, 3),         # (x,y) -> (y,-x)
+                'S4':           lambda d: d[:, inv].transpose(1, 0, 2, 3),         # (x,y) -> (-y,x) (spatially)
+                'S4_inv':       lambda d: d[inv, :].transpose(1, 0, 2, 3),         # (x,y) -> (y,-x) (spatially)
+                'C2_xplusy':    lambda d: d.transpose(1, 0, 2, 3),                 # (x,y) -> (y,x)
+                'C2_xminusy':   lambda d: d[inv][:, inv].transpose(1, 0, 2, 3),    # (x,y) -> (-y,-x)
+            })
+        return ops
 
     # Orbital and Spin Unitaries for SBSSr2RuO4
     def _U_identity(self): return np.eye(self.norb)
@@ -529,32 +711,74 @@ class SBSSr2RuO4(EliashbergSolver):
         
         Factorized form: gamma_ph[w, k, a, b, c, d] = chi_wk[w, k] * vertex_sum[a, b, c, d]
         """
-        # chi_wr_from_chi_wk expects a 4-index tensor (tensor_valued<4>)
-        chi_wk = Gf(mesh=wmesh_boson_kmesh, target_shape=(1, 1, 1, 1))
+        # Resolve per-vertex parameters (g, chi0, Xi, Q, form_factor)
+        vertex_factors = self._resolve_vertex_factors()
         
-        for iO, k in wmesh_boson_kmesh:
-            kx, ky, kz = k
-            for Qx in [self.Q, -self.Q]:
-                for Qy in [self.Q, -self.Q]:
-                    denominator = (1/self.Xi**2 + 2 * (2 - np.cos(kx - Qx) - np.cos(ky - Qy)) + 
-                                  np.abs(iO.value) * self.gamma * (1 + (np.abs(iO.value))/(self.bandwidth)))
-                    chi_wk[iO, k][0,0,0,0] += self.Chi0 / denominator / 4.0
-        
-        # Constant vertex tensor in orbital space
-        vertex_sum = np.zeros(target_shape*2, dtype=complex)
-        for v in self.Vertices:
-             vertex_sum += np.tensordot(v, v, axes=0)
-             
+        # Group vertices by identical dynamic susceptibility parameters to minimize Gf allocations and FFTs
+        channels_map = {}
+        for v, vf in zip(self.Vertices, vertex_factors):
+            if vf.get('form_factor') is not None:
+                raise NotImplementedError("Custom dynamic form factors are not yet supported. Please use the static solver or standard paramagnon formulation.")
+                
+            q_key = tuple(vf['Q']) if isinstance(vf['Q'], (list, tuple, np.ndarray)) else vf['Q']
+            key = (q_key, vf['Xi'], vf['chi0'], getattr(self, 'gamma', 20.0), getattr(self, 'bandwidth', 3.253), id(vf['form_factor']))
+            v_tens = (vf['g']**2) * np.tensordot(v, v, axes=0)
+            if key not in channels_map:
+                channels_map[key] = {'vf': vf, 'v_sum': v_tens.copy()}
+            else:
+                channels_map[key]['v_sum'] += v_tens
+
+        # Construct bosonic Matsubara Green's functions for each distinct channel
+        vertex_channels = []
+        for ch in channels_map.values():
+            vf = ch['vf']
+            v_sum = ch['v_sum']
+            chi_wk = Gf(mesh=wmesh_boson_kmesh, target_shape=(1, 1, 1, 1))
+            
+            Q = vf['Q']
+            Xi = vf['Xi']
+            chi0 = vf['chi0']
+            gamma = getattr(self, 'gamma', 20.0)
+            bandwidth = getattr(self, 'bandwidth', 3.2534755286387123)
+            
+            # Determine peak wavevectors based on Q format
+            # TODO: In the future, this Q-parsing logic should be combined with compute_paramagnon_form_factor to reduce code duplication.
+            if np.isscalar(Q):
+                q_peaks = [(0.0, 0.0)] if np.isclose(Q, 0.0) else [(+Q, +Q), (+Q, -Q), (-Q, +Q), (-Q, -Q)]
+            elif isinstance(Q, (tuple, list, np.ndarray)) and len(Q) == 2 and np.isscalar(Q[0]):
+                qx, qy = Q[0], Q[1]
+                q_peaks = [(0.0, 0.0)] if (np.isclose(qx, 0.0) and np.isclose(qy, 0.0)) else list({(+qx, +qy), (+qx, -qy), (-qx, +qy), (-qx, -qy)})
+            else:
+                q_peaks = list(Q) if isinstance(Q, (list, tuple)) else [(0.0, 0.0)]
+                
+            inv_xi2 = 1.0 / (Xi**2)
+            n_peaks = float(len(q_peaks))
+            
+            # Evaluate dynamic susceptibility on frequency-momentum mesh with chi0 prefactor
+            for iO, k in wmesh_boson_kmesh:
+                kx, ky, kz = k
+                omega_term = np.abs(iO.value) * gamma * (1.0 + np.abs(iO.value) / bandwidth)
+                val = 0.0
+                for Qx, Qy in q_peaks:
+                    denom = inv_xi2 + 2.0 * (2.0 - np.cos(kx - Qx) - np.cos(ky - Qy)) + omega_term
+                    val += 1.0 / denom
+                chi_wk[iO, k][0, 0, 0, 0] = chi0 * (val / n_peaks)
+            
+            vertex_channels.append((chi_wk, v_sum))
+
         # Store factorized parts for memory-efficient solvers
-        self.chi_wk = chi_wk
-        self.vertex_sum = vertex_sum
+        self.vertex_channels = vertex_channels
+        self.chi_wk = vertex_channels[0][0]
+        self.vertex_sum = sum(ch['v_sum'] for ch in channels_map.values())
 
         # We keep gamma_ph creation for compatibility, but it might crash for NW=4096.
         # Check if mesh is small enough to avoid memory crash (threshold ~ 4GB)
         mesh_size = len(wmesh_boson_kmesh) * np.prod(target_shape*2) * 16 # 16 bytes per complex
         if mesh_size < 4 * 1e9:
             gamma_ph = Gf(mesh=wmesh_boson_kmesh, target_shape=target_shape*2)
-            gamma_ph.data[:] = self.g**2 * chi_wk.data[:, :, 0, 0, 0, 0, None, None, None, None] * vertex_sum
+            gamma_ph.data.fill(0.0)
+            for chi_wk_c, v_sum_c in vertex_channels:
+                gamma_ph.data[:] += self.g**2 * chi_wk_c.data[:, :, 0, 0, 0, 0, None, None, None, None] * v_sum_c
             self.gamma_ph = gamma_ph
         else:
             print("Warning: Large mesh detected. Skipping full gamma_ph allocation to save memory.")
@@ -570,27 +794,65 @@ class SBSSr2RuO4(EliashbergSolver):
             Xi: Correlation length
         Factorized form: gamma_ph_static[k, a, b, c, d] = chi_k[k] * vertex_sum[a, b, c, d]
         """
-        chi_k = Gf(mesh=kmesh, target_shape=(1, 1, 1, 1))
+        # Extract 2D momentum coordinates from Brillouin zone mesh
+        kx = np.array([float(k[0]) for k in kmesh])
+        ky = np.array([float(k[1]) for k in kmesh])
         
-        for k in kmesh:
-            kx, ky, kz = k
-            for Qx in [self.Q, -self.Q]:
-                for Qy in [self.Q, -self.Q]:
-                    denominator = (1/self.Xi**2 + 2 * (2 - np.cos(kx - Qx) - np.cos(ky - Qy)))
-                    chi_k[k][0,0,0,0] += self.Chi0 / denominator / 4.0
-        
-        vertex_sum = np.zeros(target_shape*2, dtype=complex)
-        for v in self.Vertices:
-             vertex_sum += np.tensordot(v, v, axes=0)
-             
-        self.chi_k = chi_k
-        self.vertex_sum = vertex_sum
+        # Resolve per-vertex parameters (g, chi0, Xi, Q, form_factor)
+        vertex_factors = self._resolve_vertex_factors()
         
         # Static mesh is usually small, so we keep gamma_ph_static
         gamma_ph_static = Gf(mesh=kmesh, target_shape=target_shape*2)
-        gamma_ph_static.data[:] = self.g**2 * chi_k.data[:, 0, 0, 0, 0, None, None, None, None] * vertex_sum
+        gamma_ph_static.data.fill(0.0)
         
-        print(f"Just loaded static factorized interaction at {datetime.datetime.now()}")
+        chi_k_list = []
+        vertex_sum = np.zeros(target_shape*2, dtype=complex)
+        
+        # Group vertices by identical static parameters to minimize form-factor evaluations
+        channels_map = {}
+        for v, vf in zip(self.Vertices, vertex_factors):
+            q_key = tuple(vf['Q']) if isinstance(vf['Q'], (list, tuple, np.ndarray)) else vf['Q']
+            key = (q_key, vf['Xi'], vf['chi0'], id(vf['form_factor']))
+            
+            weight = (vf['g']**2) * vf['chi0']
+            v_tens = weight * np.tensordot(v, v, axes=0)
+            
+            if key not in channels_map:
+                channels_map[key] = {'vf': vf, 'v_sum': v_tens.copy()}
+            else:
+                channels_map[key]['v_sum'] += v_tens
+
+        # Accumulate each vertex channel with its individual momentum structure
+        for ch in channels_map.values():
+            vf = ch['vf']
+            v_sum = ch['v_sum']
+            ff = vf['form_factor']
+            
+            if ff is not None:
+                # Use custom form factor if provided (callable or array-like)
+                if callable(ff):
+                    chi_i = ff(kx, ky)
+                elif hasattr(ff, 'data'):
+                    chi_i = ff.data.reshape(len(kmesh))
+                else:
+                    chi_i = np.asarray(ff).reshape(len(kmesh))
+            else:
+                # Standard paramagnon momentum form factor for this vertex
+                chi_i = compute_paramagnon_form_factor(kx, ky, vf['Q'], vf['Xi'])
+            
+            # Store Gf object with chi0 factor for compatibility and inspection
+            chi_gf = Gf(mesh=kmesh, target_shape=(1, 1, 1, 1))
+            chi_gf.data[:] = vf['chi0'] * chi_i[:, None, None, None, None]
+            chi_k_list.append(chi_gf)
+            
+            # Direct accumulation into the full interaction tensor: Gamma_ph += g^2 * (chi(k)) * v_sum
+            vertex_sum += v_sum
+            gamma_ph_static.data[:] += self.g**2 * chi_i[:, None, None, None, None] * v_sum
+            
+        # Store factorized parts for memory-efficient solvers and compatibility
+        self.chi_k = chi_k_list[0]
+        self.chi_k_list = chi_k_list
+        self.vertex_sum = vertex_sum
         self.gamma_ph_static = gamma_ph_static
         return gamma_ph_static
 
@@ -846,7 +1108,7 @@ class PSSr2RuO4(SBSSr2RuO4):
         self.int2 = 7.8 / 1000 * 0 # turned off because this BCC term breaks the translational symmetry of the square lattice
         self.int3 = 0 / 1000
         self.int4 = 0 / 1000
-        self.jnt = 2.7 / 1000
+        self.jnt = 2.7 / 1000 * 0 # turned off because this BCC term breaks the translational symmetry of the square lattice
         self.Eta1 = 59.2 / 1000
         self.Eta2 = 59.2 / 1000
         self.bandwidth = 3.2534755286387123
@@ -902,12 +1164,167 @@ class PSSr2RuO4(SBSSr2RuO4):
         ])
         
         hk = np.kron(epsilon_matrix, sigma[0]) + (
-            self.Eta1 * np.kron(-1*GellMannMatrix[8], sigma[1]) +
-            self.Eta1 * np.kron(GellMannMatrix[6], sigma[2]) +
-            self.Eta2 * np.kron(-1*GellMannMatrix[2], sigma[3])
+            self.Eta1 * np.kron(ell[1], sigma[1]) +
+            self.Eta1 * np.kron(ell[2], sigma[2]) +
+            self.Eta2 * np.kron(ell[3], sigma[3])
         )
 
         return hk
+
+
+class SROGammaBandOnlyWithStrain(EliashbergSolver):
+    def __init__(self, nk=12, n_w=1024, T=30., mu=0., Xi=2.58, Q=2*pi*0.3, g=1.0, eps_xx=0.0, nu_xy=0.5211065, alpha=7.7047, chi0=1.0, data_path=None, **kwargs):
+        norb = 2
+        Vertices = sigma[1:]
+        
+        self.eps_xx = eps_xx
+        self.nu_xy = nu_xy
+        self.alpha = alpha
+        
+        self.t1 = 0.119
+        self.t4 = 0.392 * self.t1
+        self.mu_xy = 1.48 * self.t1
+        
+        self.chi0 = chi0
+        self.data_path = data_path
+        
+        if eps_xx != 0.0:
+            kwargs['point_group'] = 'D2h'
+        super().__init__(nk=nk, n_w=n_w, T=T, mu=mu, Xi=Xi, Q=Q, norb=norb, Vertices=Vertices, g=g, **kwargs)
+
+    def calculate_hk(self, kx, ky, kz):
+        t1x = self.t1 * (1.0 - self.alpha * self.eps_xx)
+        t1y = self.t1 * (1.0 + self.alpha * self.nu_xy * self.eps_xx)
+        t4_eff = self.t4 * (1.0 - 0.5 * self.alpha * (1.0 - self.nu_xy) * self.eps_xx)
+
+        eps_xy = (
+            -2.0 * t1x * np.cos(kx)
+            -2.0 * t1y * np.cos(ky)
+            -2.0 * t4_eff * (np.cos(kx + ky) 
+                             + np.cos(kx - ky))
+            - self.mu_xy
+        )
+        eps_xy = np.asarray(eps_xy)
+        hk_base = eps_xy[..., np.newaxis, np.newaxis]
+        return hk_base * np.eye(2)
+
+    calculate_hk_vectorized = calculate_hk
+
+    def calculate_gamma(self, wmesh_boson_kmesh, target_shape):
+        chi_wk = Gf(mesh=wmesh_boson_kmesh, target_shape=(1, 1, 1, 1))
+        
+        if self.data_path is not None:
+            data = np.load(self.data_path)
+            if 'strains' in data:
+                strain_pct = self.eps_xx * 100
+                idx = np.argmin(np.abs(data['strains'] - strain_pct))
+                chi_matsubara_strain = data['chi_matsubara'][idx]
+                Omega_m_data = data['Omega_m']
+            else:
+                chi_matsubara_strain = data['chi_matsubara']
+                Omega_m_data = data['Omega_m']
+            chi_interp = interp1d(Omega_m_data, chi_matsubara_strain, kind='linear', fill_value='extrapolate')
+        else:
+            chi_interp = lambda w: self.chi0
+            
+        for iO, k in wmesh_boson_kmesh:
+            kx, ky, kz = k
+            momentum_factor = 0
+            for Qx in [self.Q, -self.Q]:
+                for Qy in [self.Q, -self.Q]:
+                    denominator = 1.0 + 2 * self.Xi**2 * (2 - np.cos(kx - Qx) - np.cos(ky - Qy))
+                    momentum_factor += 1.0 / denominator / 4.0
+            
+            chi_wk[iO, k][0,0,0,0] = chi_interp(iO.value.imag) * momentum_factor
+            
+        vertex_sum = np.zeros(target_shape*2, dtype=complex)
+        for v in self.Vertices:
+             vertex_sum += np.tensordot(v, v, axes=0)
+             
+        self.chi_wk = chi_wk
+        self.vertex_sum = vertex_sum
+        
+        gamma_ph = Gf(mesh=wmesh_boson_kmesh, target_shape=target_shape*2)
+        for iO, k in wmesh_boson_kmesh:
+            gamma_ph[iO, k] = self.g**2 * chi_wk[iO, k][0, 0, 0, 0] * vertex_sum
+            
+        self.gamma_ph = gamma_ph
+        return gamma_ph
+
+
+
+class SBS3BandWithStrain(SBSSr2RuO4):
+    """
+    3-band SBS model with strain applied ONLY to the gamma (xy) band by default.
+    The filling can be held fixed by using `fixed_density=True` in __init__,
+    and setting `filling=4.0/6.0` (4 electrons in 3 bands, meaning 4/6 filling per spin-orbital).
+    This is largely for provenance and superceded by SBSSr2RuO4 where all orbital hoppings have strain dependence.
+    """
+    def __init__(self, nk=12, n_w=1024, T=30., mu=0., Xi=2.58, Q=2*np.pi*0.3, g=1.36/np.sqrt(3), 
+                 eps_xx=0.0, nu_xy=0.5211065, alpha=7.7047, beta=0.0, chi0=None, data_path=None, **kwargs):
+        
+        self.chi0_val = chi0
+        self.data_path = data_path
+        
+        if eps_xx != 0.0:
+            kwargs['point_group'] = 'D2h'
+        
+        super().__init__(nk=nk, n_w=n_w, T=T, mu=mu, Xi=Xi, Q=Q, g=g, 
+                         eps_xx=eps_xx, nu_xy=nu_xy, alpha=alpha, beta=beta, **kwargs)
+        
+        # If the user provides chi0, we override self.Chi0 for static parts
+        if chi0 is not None:
+            self.Chi0 = chi0
+
+    def calculate_gamma(self, wmesh_boson_kmesh, target_shape):
+        """
+        Calculate Gamma_ph using Paramagnon form-factor with strain-dependent chi0 data if provided.
+        """
+        chi_wk = Gf(mesh=wmesh_boson_kmesh, target_shape=(1, 1, 1, 1))
+        
+        if self.data_path is not None:
+            data = np.load(self.data_path)
+            if 'strains' in data:
+                strain_pct = self.eps_xx * 100
+                idx = np.argmin(np.abs(data['strains'] - strain_pct))
+                chi_matsubara_strain = data['chi_matsubara'][idx]
+                Omega_m_data = data['Omega_m']
+            else:
+                chi_matsubara_strain = data['chi_matsubara']
+                Omega_m_data = data['Omega_m']
+            chi_interp = interp1d(Omega_m_data, chi_matsubara_strain, kind='linear', fill_value='extrapolate')
+        else:
+            chi_interp = lambda w: self.Chi0
+            
+        for iO, k in wmesh_boson_kmesh:
+            kx, ky, kz = k
+            momentum_factor = 0
+            for Qx in [self.Q, -self.Q]:
+                for Qy in [self.Q, -self.Q]:
+                    denominator = (1/self.Xi**2 + 2 * (2 - np.cos(kx - Qx) - np.cos(ky - Qy)) + 
+                                  np.abs(iO.value) * self.gamma * (1 + (np.abs(iO.value))/(self.bandwidth)))
+                    momentum_factor += 1.0 / denominator / 4.0
+            
+            chi_wk[iO, k][0,0,0,0] = chi_interp(iO.value.imag) * momentum_factor
+            
+        vertex_sum = np.zeros(target_shape*2, dtype=complex)
+        for v in self.Vertices:
+             vertex_sum += np.tensordot(v, v, axes=0)
+             
+        self.chi_wk = chi_wk
+        self.vertex_sum = vertex_sum
+        
+        mesh_size = len(wmesh_boson_kmesh) * np.prod(target_shape*2) * 16
+        if mesh_size < 4 * 1e9:
+            gamma_ph = Gf(mesh=wmesh_boson_kmesh, target_shape=target_shape*2)
+            gamma_ph.data[:] = self.g**2 * chi_wk.data[:, :, 0, 0, 0, 0, None, None, None, None] * vertex_sum
+            self.gamma_ph = gamma_ph
+        else:
+            print("Warning: Large mesh detected. Skipping full gamma_ph allocation to save memory.")
+            
+        print(f"Just loaded factorized interaction objects at {datetime.datetime.now()}")
+        return None
+
 
 
 if __name__ == '__main__':
